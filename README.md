@@ -1,3 +1,5 @@
+<img src="./transfusion.png" width="400px"></img>
+
 ## Transfusion - Pytorch (wip)
 
 Pytorch implementation of [Transfusion](https://www.arxiv.org/abs/2408.11039), Predict the Next Token and Diffuse Images with One Multi-Modal Model", from MetaAI.
