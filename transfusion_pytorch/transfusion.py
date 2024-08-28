@@ -15,6 +15,14 @@ def exists(v):
 def default(v, d):
     return v if exists(v) else d
 
+# tensor helpers
+
+def l2norm(t):
+    return F.normalize(t, dim = -1)
+
+def softclamp(t, value = 50.):
+    return (t / value).tanh() * value
+
 # attention
 
 class RMSNorm(Module):
@@ -24,7 +32,7 @@ class RMSNorm(Module):
         self.gamma = nn.Parameter(torch.zeros(dim))
 
     def forward(self, x):
-        return F.normalize(x, dim = -1) * self.scale * (self.gamma + 1) # use unit offset from Ohad Rubin
+        return l2norm(x) * self.scale * (self.gamma + 1) # use unit offset from Ohad Rubin
 
 class GEGLU(Module):
     def forward(self, x):
@@ -52,7 +60,7 @@ class Attention(Module):
         dim_head = 64,
         heads = 8,
         dropout = 0.,
-
+        softcap_value = 50.,
     ):
         super().__init__()
         self.scale = dim_head ** -0.5
@@ -64,6 +72,8 @@ class Attention(Module):
             nn.Linear(dim, dim_inner * 3, bias = False),
             Rearrange('b n (qkv h d) -> qkv b h n d', qkv = 3, h = heads)
         )
+
+        self.softcap_value = softcap_value
 
         self.dropout = nn.Dropout(dropout)
 
@@ -83,6 +93,8 @@ class Attention(Module):
 
         q = q * self.scale
         sim = einsum(q, k, 'b h i d, b h j d -> b h i j')
+
+        sim = softclamp(sim, self.softcap_value)
 
         if exists(attn_mask):
             mask_value = -torch.finfo(sim.dtype).max
