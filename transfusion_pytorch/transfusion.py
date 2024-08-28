@@ -67,7 +67,7 @@ def naive_attn_mask(
             einx.less_equal('j, modality -> modality 1 j', seq, offsets + length)
         )
 
-        return is_causal | is_modality
+        return is_causal | is_modality.any(dim = 0)
 
     return create_mask
 
