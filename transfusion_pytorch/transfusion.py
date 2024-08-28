@@ -25,6 +25,33 @@ def l2norm(t):
 def softclamp(t, value = 50.):
     return (t / value).tanh() * value
 
+# flex attention mask construction
+# https://pytorch.org/blog/flexattention/
+
+def causal(b, h, q_idx, kv_idx):
+    return q_idx >= kv_idx
+
+def modality(offset, length):
+    right_point = offset + length
+
+    def mask_fn(b, h, q_idx, kv_idx):
+        return q_idx <= right_point & kv_idx <= right_point
+
+    return mask_fn
+
+def transfusion_mask(modalities: list[tuple[int, int]]):
+
+    def mask_mod(*args):
+        is_causal = causal(*args)
+
+        modality_mask_mods = [modality(*modality_coors_info) for modality_coors_info in modalities]
+
+        is_modality = any([fn(*args) for fn in modality_mask_mods])
+
+        return is_causal | is_modality
+
+    return mask_mod
+
 # attention
 
 class RMSNorm(Module):
