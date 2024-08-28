@@ -120,6 +120,8 @@ class Transformer(Module):
         heads = 8,
         dropout = 0.,
         ff_expansion_factor = 4,
+        attn_kwargs: dict = dict(),
+        ff_kwargs: dict = dict()
     ):
         super().__init__()
 
@@ -127,8 +129,8 @@ class Transformer(Module):
 
         for _ in range(depth):
             layers.append(ModuleList([
-                Attention(dim = dim, dim_head = dim_head, heads = heads, dropout = dropout),
-                FeedForward(dim = dim, expansion_factor = ff_expansion_factor)
+                Attention(dim = dim, dim_head = dim_head, heads = heads, dropout = dropout, **attn_kwargs),
+                FeedForward(dim = dim, expansion_factor = ff_expansion_factor, **ff_kwargs)
             ]))
 
         self.layers = layers
@@ -141,7 +143,7 @@ class Transformer(Module):
     ):
 
         for attn, ff in self.layers:
-            x = attn(x) + x
+            x = attn(x, attn_mask = attn_mask) + x
             x = ff(x) + x
 
         return self.norm(x)
