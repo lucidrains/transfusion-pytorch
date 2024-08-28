@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import torch
-from torch import nn
+from torch import nn, Tensor, tensor
 import torch.nn.functional as F
 from torch.nn import Module, ModuleList
+from torch.nn.utils.rnn import pad_sequence
 
 import einx
 from einops import rearrange, repeat, einsum
@@ -34,7 +35,7 @@ def causal(b, h, q_idx, kv_idx):
 def modality(offset, length):
 
     def mask_fn(b, h, q_idx, kv_idx):
-        return q_idx >= offset & kv_idx <= (offset + length)
+        return q_idx >= offset & kv_idx < (offset + length)
 
     return mask_fn
 
@@ -52,24 +53,26 @@ def transfusion_mask(modalities: list[tuple[int, int]]):
     return mask_mod
 
 def naive_attn_mask(
-    modalities: list[tuple[int, int]]
+    seq_len: int,
+    modalities: list[list[tuple[int, int]]],
+    device = None
 ):
 
-    offsets, length = torch.tensor(modalities).unbind(dim = -1)
+    modalities: list[Tensor] = [tensor(modality) for modality in modalities]
+    modalities = pad_sequence(modalities, batch_first = True, padding_value = 0)
 
-    def create_mask(seq_len):
-        seq = torch.arange(seq_len)
+    offsets, length = tensor(modalities).unbind(dim = -1)
 
-        is_causal = einx.greater_equal('i, j -> i j', seq, seq)
+    seq = torch.arange(seq_len, device = device)
 
-        is_modality = (
-            einx.greater_equal('i, modality -> modality i 1', seq, offsets) &
-            einx.less_equal('j, modality -> modality 1 j', seq, offsets + length)
-        )
+    is_causal = einx.greater_equal('i, j -> i j', seq, seq)
 
-        return is_causal | is_modality.any(dim = 0)
+    is_modality = (
+        einx.greater_equal('i, b modality -> b modality i 1', seq, offsets) &
+        einx.less('j, b modality -> b modality 1 j', seq, offsets + length)
+    )
 
-    return create_mask
+    return is_causal | is_modality.any(dim = 1)
 
 # attention
 
@@ -185,8 +188,18 @@ class Transformer(Module):
     def forward(
         self,
         x,
-        attn_mask = None
+        attn_mask = None,
+        modalities: list[list[tuple[int, int]]] | None = None
     ):
+        seq_len, device = x.shape[-2], x.device
+        assert exists(attn_mask) ^ exists(modalities)
+
+        # create the specialized mask needed for autoregressive text + bidirectional diffusion attention
+
+        if exists(modalities):
+            attn_mask = naive_attn_mask(seq_len, modalities, device = device)
+
+        # transformer layers as usual, using mask from above
 
         for attn, ff in self.layers:
             x = attn(x, attn_mask = attn_mask) + x
