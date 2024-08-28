@@ -47,4 +47,4 @@ dev-dependencies = [
 allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
-packages = ["transfusion-pytorch"]
+packages = ["transfusion_pytorch"]
