@@ -32,10 +32,9 @@ def causal(b, h, q_idx, kv_idx):
     return q_idx >= kv_idx
 
 def modality(offset, length):
-    right_point = offset + length
 
     def mask_fn(b, h, q_idx, kv_idx):
-        return q_idx <= right_point & kv_idx <= right_point
+        return q_idx >= offset & kv_idx <= (offset + length)
 
     return mask_fn
 
@@ -51,6 +50,26 @@ def transfusion_mask(modalities: list[tuple[int, int]]):
         return is_causal | is_modality
 
     return mask_mod
+
+def naive_attn_mask(
+    modalities: list[tuple[int, int]]
+):
+
+    offsets, length = torch.tensor(modalities).unbind(dim = -1)
+
+    def create_mask(seq_len):
+        seq = torch.arange(seq_len)
+
+        is_causal = einx.greater_equal('i, j -> i j', seq, seq)
+
+        is_modality = (
+            einx.greater_equal('i, modality -> modality i 1', seq, offsets) &
+            einx.less_equal('j, modality -> modality 1 j', seq, offsets + length)
+        )
+
+        return is_causal | is_modality
+
+    return create_mask
 
 # attention
 
