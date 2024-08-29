@@ -1,5 +1,14 @@
 from __future__ import annotations
 
+"""
+global ein notation
+
+b - batch
+n - sequence
+d - dimension
+l - logits (text)
+"""
+
 import torch
 from torch import nn, Tensor, tensor
 import torch.nn.functional as F
@@ -218,6 +227,7 @@ class Transfusion(Module):
         *,
         num_text_tokens,
         transformer: dict | Transformer,
+        ignore_index = -1
     ):
         super().__init__()
 
@@ -233,14 +243,30 @@ class Transfusion(Module):
 
         self.text_embed = nn.Embedding(num_text_tokens, dim)
 
+        self.to_text_logits = nn.Linear(dim, num_text_tokens, bias = False)
+
+        self.ignore_index = ignore_index
+
     def forward(
         self,
-        x,
-        modalities: list[list[tuple[int, int]]] | None = None
-    ):
+        x: Int['b n'],
+        modalities: list[list[tuple[int, int]]] | None = None,
+        return_loss = True
+
+    ) -> Float['b n l'] | Float['']:
+
+        if return_loss:
+            x, labels = x[:, :-1], x[:, 1:]
 
         x = self.text_embed(x)
 
-        x = self.transformer(x, modalities = modalities)
+        embed = self.transformer(x, modalities = modalities)
 
-        return x
+        text_logits = self.to_text_logits(embed)
+
+        if not return_loss:
+            return text_logits
+
+        text_logits = rearrange(text_logits, 'b n l -> b l n')
+
+        return F.cross_entropy(text_logits, labels, ignore_index = self.ignore_index)
