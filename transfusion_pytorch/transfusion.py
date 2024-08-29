@@ -10,6 +10,8 @@ import einx
 from einops import rearrange, repeat, einsum
 from einops.layers.torch import Rearrange
 
+from transfusion_pytorch.tensor_typing import Float, Int, Bool
+
 # helper functions
 
 def exists(v):
@@ -61,7 +63,7 @@ def naive_attn_mask(
     modalities: list[Tensor] = [tensor(modality) for modality in modalities]
     modalities = pad_sequence(modalities, batch_first = True, padding_value = 0)
 
-    offsets, length = tensor(modalities).unbind(dim = -1)
+    offsets, length = modalities.unbind(dim = -1)
 
     seq = torch.arange(seq_len, device = device)
 
@@ -173,6 +175,7 @@ class Transformer(Module):
         ff_kwargs: dict = dict()
     ):
         super().__init__()
+        self.dim = dim
 
         layers = ModuleList([])
 
@@ -212,12 +215,32 @@ class Transformer(Module):
 class Transfusion(Module):
     def __init__(
         self,
-        dim
+        *,
+        num_text_tokens,
+        transformer: dict | Transformer,
     ):
         super().__init__()
 
+        # transformer
+
+        if isinstance(transformer, dict):
+            transformer = Transformer(**transformer)
+
+        self.transformer = transformer
+        dim = transformer.dim
+
+        # embeddings and un-embeddings
+
+        self.text_embed = nn.Embedding(num_text_tokens, dim)
+
     def forward(
         self,
-        x
+        x,
+        modalities: list[list[tuple[int, int]]] | None = None
     ):
+
+        x = self.text_embed(x)
+
+        x = self.transformer(x, modalities = modalities)
+
         return x
