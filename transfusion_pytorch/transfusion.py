@@ -33,6 +33,7 @@ pad_sequence = partial(pad_sequence, batch_first = True)
 RawModalityInfo = list[list[tuple[int, int]]]
 
 LossBreakdown = namedtuple('LossBreakdown', ['total', 'text', 'diffusion'])
+
 # helper functions
 
 def exists(v):
@@ -126,6 +127,71 @@ def naive_attn_mask(
     )
 
     return is_causal | is_modality.any(dim = 1)
+
+# adaptive layernorm and ada-ln zero rolled into one wrapper
+# from DiT paper and sota for time conditioning for now
+
+class AdaptiveWrapper(Module):
+    def __init__(
+        self,
+        fn: Module,
+        dim,
+        dim_cond,
+    ):
+        super().__init__()
+        self.fn = fn
+        self.dim = dim
+        self.dim_cond = dim_cond
+
+        self.layernorm = nn.LayerNorm(dim, elementwise_affine = False)
+
+        # text will be subjected to normal layernorm bias
+        # and for output will use layerscale
+
+        self.layernorm_bias = nn.Parameter(torch.zeros(dim))
+        self.layerscale = nn.Parameter(torch.ones(dim))
+
+        # modalities will get the adaptive layernorm + ada-ln zero
+
+        self.to_film = nn.Sequential(
+            nn.Linear(dim_cond, dim * 2),
+            Rearrange('b (gamma_beta d) -> gamma_beta b 1 d', gamma_beta = 2)
+        )
+
+        self.to_ada_ln_zero = nn.Linear(dim_cond, dim)
+
+        nn.init.zeros_(self.to_film[0].weight, 0.)
+        nn.init.zeros_(self.to_ada_ln_zero[0].weight, 0.)
+        nn.init.constant_(self.to_ada_ln_zero[0].bias, -2.)
+
+    def forward(
+        self,
+        x: Float['b n {self.dim}'],
+        cond: Float['b n {self.dim_cond}'],
+        is_any_modality: Bool['b n'],
+        **kwargs
+    ):
+        is_any_modality = rearrange(is_any_modality, '... -> ... 1')
+
+        x = self.layernorm(x)
+
+        gamma, beta = self.to_film(cond)
+
+        text_tokens = x + self.layernorm_bias
+        modality_tokens = x * (gamma + 1.) + beta
+
+        x = torch.where(is_any_modality, modality_tokens, text_tokens)
+
+        # attention or feedforwards
+
+        out = self.fn(x, **kwargs)
+
+        # take care of conditioning output separately for text vs modality
+
+        text_out = out * self.layerscale
+        modalities_out = out * self.to_ada_ln_zero(cond)
+
+        return torch.where(is_any_modality, modalities_out, text_out)
 
 # attention
 
@@ -299,8 +365,8 @@ class Transfusion(Module):
         self,
         text: Int['b n'],
         modality_tokens: Float['b n d'],
+        modalities: RawModalityInfo,
         times: Int['b'] | None = None,
-        modalities: RawModalityInfo | None = None,
         return_loss = True
 
     ) -> Float['b n l'] | Float['']:
@@ -314,7 +380,10 @@ class Transfusion(Module):
 
         batch, seq_len, device = *text.shape, text.device
 
+        assert len(modalities) == batch
+
         is_modalities = modalities_tensor_to_is_modality_mask(seq_len, modalities)
+
         is_any_modality = reduce(is_modalities, 'b m n -> b n', 'any')
 
         # embed text
