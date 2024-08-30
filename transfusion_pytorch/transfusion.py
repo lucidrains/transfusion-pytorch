@@ -12,6 +12,7 @@ i, j - sequence (row, col)
 """
 
 from functools import partial
+from collections import namedtuple
 
 import torch
 from torch import nn, Tensor, tensor
@@ -31,6 +32,7 @@ pad_sequence = partial(pad_sequence, batch_first = True)
 
 RawModalityInfo = list[list[tuple[int, int]]]
 
+LossBreakdown = namedtuple('LossBreakdown', ['total', 'text', 'diffusion'])
 # helper functions
 
 def exists(v):
@@ -286,6 +288,8 @@ class Transfusion(Module):
 
         self.to_text_logits = nn.Linear(dim, num_text_tokens, bias = False)
 
+        self.to_pred_flow = nn.Linear(dim, dim, bias = False)
+
         # loss related
 
         self.ignore_index = ignore_index
@@ -295,15 +299,20 @@ class Transfusion(Module):
         self,
         text: Int['b n'],
         modality_tokens: Float['b n d'],
+        times: Int['b'] | None = None,
         modalities: RawModalityInfo | None = None,
         return_loss = True
 
     ) -> Float['b n l'] | Float['']:
 
+        # if returning loss, split text for next token prediction
+
         if return_loss:
             text, text_labels = text[:, :-1], text[:, 1:]
 
-        seq_len = text.shape[1]
+        # derive is_modality mask for diffusion on the right tokens + diffusion loss
+
+        batch, seq_len, device = *text.shape, text.device
 
         is_modalities = modalities_tensor_to_is_modality_mask(seq_len, modalities)
         is_any_modality = reduce(is_modalities, 'b m n -> b n', 'any')
@@ -311,6 +320,21 @@ class Transfusion(Module):
         # embed text
 
         text_tokens = self.text_embed(text)
+
+        # noise the modality tokens
+
+        if not exists(times):
+            times = torch.rand((batch,), device = device)
+
+        if return_loss:
+            padded_times = rearrange(times, 'b -> b 1 1')
+            noise = torch.randn_like(modality_tokens)
+
+            modality_tokens = modality_tokens * padded_times + noise * (1. - padded_times)
+
+            # the flow is the (data - noise)
+
+            flow = modality_tokens - noise
 
         # intersperse the modalities with the text for the joint transformer + diffusion system
 
@@ -320,26 +344,41 @@ class Transfusion(Module):
 
         embed = self.transformer(tokens, modalities = modalities)
 
-        # unembeddings
+        # text unembedding
 
         text_logits = self.to_text_logits(embed)
 
         if not return_loss:
             return text_logits
 
-        text_logits = rearrange(text_logits, 'b n l -> b l n')
+        # text autoregressive loss
 
         text_loss = F.cross_entropy(
-            text_logits,
+            rearrange(text_logits, 'b n l -> b l n'),
             text_labels,
             ignore_index = self.ignore_index,
             reduction = 'none'
         )
 
-        # only the token positions that are not modalities have autoregressive loss
-
         text_loss = text_loss[~is_any_modality].mean()
 
-        total_loss = text_loss
+        # diffusion loss
 
-        return total_loss
+        pred_flow = self.to_pred_flow(embed)
+
+        diffusion_loss = F.mse_loss(
+            pred_flow,
+            flow,
+            reduction = 'none'
+        )
+
+        diffusion_loss = diffusion_loss[is_any_modality].mean()
+
+        # only the token positions that are not modalities have autoregressive loss
+
+        total_loss = (
+            text_loss +
+            diffusion_loss * self.diffusion_loss_weight
+        )
+
+        return total_loss, LossBreakdown(total_loss, text_loss, diffusion_loss)
