@@ -4,10 +4,14 @@ from __future__ import annotations
 global ein notation
 
 b - batch
+m - modalities
 n - sequence
 d - dimension
 l - logits (text)
+i, j - sequence (row, col)
 """
+
+from functools import partial
 
 import torch
 from torch import nn, Tensor, tensor
@@ -16,10 +20,16 @@ from torch.nn import Module, ModuleList
 from torch.nn.utils.rnn import pad_sequence
 
 import einx
-from einops import rearrange, repeat, einsum
+from einops import rearrange, repeat, reduce, einsum
 from einops.layers.torch import Rearrange
 
 from transfusion_pytorch.tensor_typing import Float, Int, Bool
+
+pad_sequence = partial(pad_sequence, batch_first = True)
+
+# constants
+
+RawModalityInfo = list[list[tuple[int, int]]]
 
 # helper functions
 
@@ -50,7 +60,7 @@ def modality(offset, length):
 
     return mask_fn
 
-def transfusion_mask(modalities: list[tuple[int, int]]):
+def transfusion_attn_mask(modalities: list[tuple[int, int]]):
 
     def mask_mod(*args):
         is_causal = causal(*args)
@@ -63,24 +73,54 @@ def transfusion_mask(modalities: list[tuple[int, int]]):
 
     return mask_mod
 
-def naive_attn_mask(
-    seq_len: int,
-    modalities: list[list[tuple[int, int]]],
-    device = None
-):
+# functions for managing modality token mask
+
+def modalities_to_tensor(
+    modalities: RawModalityInfo,
+    pad_value = 0
+) -> Int['b m 2']:
 
     modalities: list[Tensor] = [tensor(modality) for modality in modalities]
-    modalities = pad_sequence(modalities, batch_first = True, padding_value = 0)
+    modalities = pad_sequence(modalities, padding_value = pad_value)
+    return modalities
 
-    offsets, length = modalities.unbind(dim = -1)
+def modalities_tensor_to_is_modality_mask(
+    seq_len: int,
+    modalities: RawModalityInfo | Int['b m 2'],
+) -> Bool['b m n']:
+
+    if isinstance(modalities, list):
+        modalities = modalities_to_tensor(modalities)
+
+    left, right = modalities.cumsum(dim = -1).unbind(dim = -1)
+
+    seq = torch.arange(seq_len, device = modalities.device)
+
+    is_modality = (
+        einx.greater_equal('i, b m -> b m i', seq, left) &
+        einx.less('j, b m -> b m j', seq, right)
+    )
+
+    return is_modality
+
+def naive_attn_mask(
+    seq_len: int,
+    modalities: RawModalityInfo | Int['b m 2'],
+    device = None
+) -> Bool['b i j']:
+
+    if isinstance(modalities, list):
+        modalities_tensor = modalities_to_tensor(modalities)
+
+    offsets, length = modalities_tensor.unbind(dim = -1)
 
     seq = torch.arange(seq_len, device = device)
 
     is_causal = einx.greater_equal('i, j -> i j', seq, seq)
 
     is_modality = (
-        einx.greater_equal('i, b modality -> b modality i 1', seq, offsets) &
-        einx.less('j, b modality -> b modality 1 j', seq, offsets + length)
+        einx.greater_equal('i, b m -> b m i 1', seq, offsets) &
+        einx.less('j, b m -> b m 1 j', seq, offsets + length)
     )
 
     return is_causal | is_modality.any(dim = 1)
@@ -94,7 +134,7 @@ class RMSNorm(Module):
         self.gamma = nn.Parameter(torch.zeros(dim))
 
     def forward(self, x):
-        return l2norm(x) * self.scale * (self.gamma + 1) # use unit offset from Ohad Rubin
+        return l2norm(x) * self.scale * (self.gamma + 1.) # use unit offset from Ohad Rubin
 
 class GEGLU(Module):
     def forward(self, x):
@@ -227,7 +267,8 @@ class Transfusion(Module):
         *,
         num_text_tokens,
         transformer: dict | Transformer,
-        ignore_index = -1
+        ignore_index = -1,
+        diffusion_loss_weight = 1.
     ):
         super().__init__()
 
@@ -245,22 +286,41 @@ class Transfusion(Module):
 
         self.to_text_logits = nn.Linear(dim, num_text_tokens, bias = False)
 
+        # loss related
+
         self.ignore_index = ignore_index
+        self.diffusion_loss_weight = diffusion_loss_weight
 
     def forward(
         self,
-        x: Int['b n'],
-        modalities: list[list[tuple[int, int]]] | None = None,
+        text: Int['b n'],
+        modality_tokens: Float['b n d'],
+        modalities: RawModalityInfo | None = None,
         return_loss = True
 
     ) -> Float['b n l'] | Float['']:
 
         if return_loss:
-            x, labels = x[:, :-1], x[:, 1:]
+            text, text_labels = text[:, :-1], text[:, 1:]
 
-        x = self.text_embed(x)
+        seq_len = text.shape[1]
 
-        embed = self.transformer(x, modalities = modalities)
+        is_modalities = modalities_tensor_to_is_modality_mask(seq_len, modalities)
+        is_any_modality = reduce(is_modalities, 'b m n -> b n', 'any')
+
+        # embed text
+
+        text_tokens = self.text_embed(text)
+
+        # intersperse the modalities with the text for the joint transformer + diffusion system
+
+        tokens = einx.where('b n, b n d, b n d', is_any_modality, modality_tokens, text_tokens)
+
+        # attention
+
+        embed = self.transformer(tokens, modalities = modalities)
+
+        # unembeddings
 
         text_logits = self.to_text_logits(embed)
 
@@ -269,4 +329,17 @@ class Transfusion(Module):
 
         text_logits = rearrange(text_logits, 'b n l -> b l n')
 
-        return F.cross_entropy(text_logits, labels, ignore_index = self.ignore_index)
+        text_loss = F.cross_entropy(
+            text_logits,
+            text_labels,
+            ignore_index = self.ignore_index,
+            reduction = 'none'
+        )
+
+        # only the token positions that are not modalities have autoregressive loss
+
+        text_loss = text_loss[~is_any_modality].mean()
+
+        total_loss = text_loss
+
+        return total_loss
