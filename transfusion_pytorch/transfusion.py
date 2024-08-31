@@ -170,7 +170,7 @@ class AdaptiveWrapper(Module):
         # text will be subjected to normal layernorm bias
         # and for output will use layerscale
 
-        self.layernorm_bias = nn.Parameter(torch.zeros(dim))
+        self.layernorm_gamma = nn.Parameter(torch.zeros(dim))
         self.layerscale = nn.Parameter(torch.ones(dim))
 
         # modalities will get the adaptive layernorm + ada-ln zero
@@ -198,7 +198,7 @@ class AdaptiveWrapper(Module):
 
         gamma, beta = self.to_film(cond).chunk(2, dim = -1)
 
-        text_tokens = x + self.layernorm_bias
+        text_tokens = x * (self.layernorm_gamma + 1.)
         modality_tokens = x * (gamma + 1.) + beta
 
         x = torch.where(is_any_modality, modality_tokens, text_tokens)
