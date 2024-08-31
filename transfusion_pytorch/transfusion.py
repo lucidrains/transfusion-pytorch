@@ -21,7 +21,7 @@ from torch.nn import Module, ModuleList
 from torch.nn.utils.rnn import pad_sequence
 
 import einx
-from einops import rearrange, repeat, reduce, einsum
+from einops import rearrange, repeat, reduce, einsum, pack
 from einops.layers.torch import Rearrange
 
 from transfusion_pytorch.tensor_typing import Float, Int, Bool
@@ -41,6 +41,9 @@ def exists(v):
 
 def default(v, d):
     return v if exists(v) else d
+
+def divisible_by(num, den):
+    return (num % den) == 0
 
 # tensor helpers
 
@@ -128,6 +131,19 @@ def naive_attn_mask(
 
     return is_causal | is_modality.any(dim = 1)
 
+# random fourier embedding
+
+class RandomFourierEmbed(Module):
+    def __init__(self, dim):
+        super().__init__()
+        assert divisible_by(dim, 2)
+        self.register_buffer('weights', torch.randn(dim // 2))
+
+    def forward(self, x):
+        freqs = einx.multiply('i, j -> i j', x, self.weights) * 2 * torch.pi
+        fourier_embed, _ = pack((x, freqs.sin(), freqs.cos()), 'b *')
+        return fourier_embed
+
 # adaptive layernorm and ada-ln zero rolled into one wrapper
 # from DiT paper and sota for time conditioning for now
 
@@ -157,8 +173,8 @@ class AdaptiveWrapper(Module):
         self.to_film = nn.Linear(dim_cond, dim * 2)
         self.to_ada_ln_zero = nn.Linear(dim_cond, dim)
 
-        nn.init.zeros_(self.to_film.weight, 0.)
-        nn.init.zeros_(self.to_ada_ln_zero.weight, 0.)
+        nn.init.zeros_(self.to_film.weight)
+        nn.init.zeros_(self.to_ada_ln_zero.weight)
         nn.init.constant_(self.to_ada_ln_zero.bias, ada_ln_zero_init_bias)
 
     def forward(
@@ -291,13 +307,23 @@ class Transformer(Module):
         super().__init__()
         self.dim = dim
 
+        self.to_time_cond = nn.Sequential(
+            RandomFourierEmbed(dim),
+            nn.Linear(dim + 1, dim * 4),
+            nn.SiLU()
+        )
+
         layers = ModuleList([])
 
         for _ in range(depth):
-            layers.append(ModuleList([
-                Attention(dim = dim, dim_head = dim_head, heads = heads, dropout = dropout, **attn_kwargs),
-                FeedForward(dim = dim, expansion_factor = ff_expansion_factor, **ff_kwargs)
-            ]))
+            attn = Attention(dim = dim, dim_head = dim_head, heads = heads, dropout = dropout, **attn_kwargs)
+
+            ff = FeedForward(dim = dim, expansion_factor = ff_expansion_factor, **ff_kwargs)
+
+            attn = AdaptiveWrapper(attn, dim = dim, dim_cond = dim * 4)
+            ff = AdaptiveWrapper(ff, dim = dim, dim_cond = dim * 4)
+
+            layers.append(ModuleList([attn, ff]))
 
         self.layers = layers
         self.norm = RMSNorm(dim)
@@ -305,22 +331,37 @@ class Transformer(Module):
     def forward(
         self,
         x,
-        attn_mask = None,
-        modalities: list[list[tuple[int, int]]] | None = None
+        times: Float['b'] | Float[''],
+        attn_mask: Bool['b i j'] | None = None,
+        modalities: RawModalityInfo | Int['b n 2'] | None = None,
+        is_any_modality: Bool['b n'] | None = None
     ):
         seq_len, device = x.shape[-2], x.device
         assert exists(attn_mask) ^ exists(modalities)
+
+        # handle time
+
+        if times.ndim == 0:
+            times = repeat(times, ' -> b', b = batch)
+
+        cond = self.to_time_cond(times)
 
         # create the specialized mask needed for autoregressive text + bidirectional diffusion attention
 
         if exists(modalities):
             attn_mask = naive_attn_mask(seq_len, modalities, device = device)
 
+        if not exists(is_any_modality):
+            assert exists(modalities)
+            is_any_modality = modalities_tensor_to_is_modality_mask(seq_len, modalities).any(dim = 1)
+
+        adaptive_kwargs = dict(cond = cond, is_any_modality = is_any_modality)
+
         # transformer layers as usual, using mask from above
 
         for attn, ff in self.layers:
-            x = attn(x, attn_mask = attn_mask) + x
-            x = ff(x) + x
+            x = attn(x, attn_mask = attn_mask, **adaptive_kwargs) + x
+            x = ff(x, **adaptive_kwargs) + x
 
         return self.norm(x)
 
@@ -410,6 +451,7 @@ class Transfusion(Module):
 
         embed = self.transformer(
             tokens,
+            times = times,
             modalities = modalities
         )
 
