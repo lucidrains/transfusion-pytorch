@@ -137,6 +137,7 @@ class AdaptiveWrapper(Module):
         fn: Module,
         dim,
         dim_cond,
+        ada_ln_zero_init_bias = -2
     ):
         super().__init__()
         self.fn = fn
@@ -153,16 +154,12 @@ class AdaptiveWrapper(Module):
 
         # modalities will get the adaptive layernorm + ada-ln zero
 
-        self.to_film = nn.Sequential(
-            nn.Linear(dim_cond, dim * 2),
-            Rearrange('b (gamma_beta d) -> gamma_beta b 1 d', gamma_beta = 2)
-        )
-
+        self.to_film = nn.Linear(dim_cond, dim * 2)
         self.to_ada_ln_zero = nn.Linear(dim_cond, dim)
 
-        nn.init.zeros_(self.to_film[0].weight, 0.)
-        nn.init.zeros_(self.to_ada_ln_zero[0].weight, 0.)
-        nn.init.constant_(self.to_ada_ln_zero[0].bias, -2.)
+        nn.init.zeros_(self.to_film.weight, 0.)
+        nn.init.zeros_(self.to_ada_ln_zero.weight, 0.)
+        nn.init.constant_(self.to_ada_ln_zero.bias, ada_ln_zero_init_bias)
 
     def forward(
         self,
@@ -175,7 +172,7 @@ class AdaptiveWrapper(Module):
 
         x = self.layernorm(x)
 
-        gamma, beta = self.to_film(cond)
+        gamma, beta = self.to_film(cond).chunk(2, dim = -1)
 
         text_tokens = x + self.layernorm_bias
         modality_tokens = x * (gamma + 1.) + beta
@@ -189,7 +186,7 @@ class AdaptiveWrapper(Module):
         # take care of conditioning output separately for text vs modality
 
         text_out = out * self.layerscale
-        modalities_out = out * self.to_ada_ln_zero(cond)
+        modalities_out = out * self.to_ada_ln_zero(cond).sigmoid()
 
         return torch.where(is_any_modality, modalities_out, text_out)
 
@@ -411,7 +408,10 @@ class Transfusion(Module):
 
         # attention
 
-        embed = self.transformer(tokens, modalities = modalities)
+        embed = self.transformer(
+            tokens,
+            modalities = modalities
+        )
 
         # text unembedding
 
