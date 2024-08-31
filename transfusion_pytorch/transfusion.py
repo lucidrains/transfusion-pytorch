@@ -137,11 +137,16 @@ class RandomFourierEmbed(Module):
     def __init__(self, dim):
         super().__init__()
         assert divisible_by(dim, 2)
+        self.dim = dim
         self.register_buffer('weights', torch.randn(dim // 2))
 
-    def forward(self, x):
-        freqs = einx.multiply('i, j -> i j', x, self.weights) * 2 * torch.pi
-        fourier_embed, _ = pack((x, freqs.sin(), freqs.cos()), 'b *')
+    def forward(
+        self,
+        times: Float['b']
+    ) -> Float['b {self.dim + 1}']:
+
+        freqs = einx.multiply('i, j -> i j', times, self.weights) * 2 * torch.pi
+        fourier_embed, _ = pack((times, freqs.sin(), freqs.cos()), 'b *')
         return fourier_embed
 
 # adaptive layernorm and ada-ln zero rolled into one wrapper
@@ -180,11 +185,14 @@ class AdaptiveWrapper(Module):
     def forward(
         self,
         x: Float['b n {self.dim}'],
-        cond: Float['b n {self.dim_cond}'],
+        cond: Float['b {self.dim_cond}'] | Float['b n {self.dim_cond}'],
         is_any_modality: Bool['b n'],
         **kwargs
     ):
         is_any_modality = rearrange(is_any_modality, '... -> ... 1')
+
+        if cond.ndim == 2:
+            cond = rearrange(cond, 'b d -> b 1 d')
 
         x = self.layernorm(x)
 
@@ -331,7 +339,7 @@ class Transformer(Module):
     def forward(
         self,
         x,
-        times: Float['b'] | Float[''],
+        times: Float[''] | Float['b'] | Float['b n'],
         attn_mask: Bool['b i j'] | None = None,
         modalities: RawModalityInfo | Int['b n 2'] | None = None,
         is_any_modality: Bool['b n'] | None = None
