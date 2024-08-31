@@ -116,9 +116,9 @@ def naive_attn_mask(
 ) -> Bool['b i j']:
 
     if isinstance(modalities, list):
-        modalities_tensor = modalities_to_tensor(modalities)
+        modalities = modalities_to_tensor(modalities)
 
-    offsets, length = modalities_tensor.unbind(dim = -1)
+    offsets, length = modalities.unbind(dim = -1)
 
     seq = torch.arange(seq_len, device = device)
 
@@ -142,11 +142,11 @@ class RandomFourierEmbed(Module):
 
     def forward(
         self,
-        times: Float['b']
-    ) -> Float['b {self.dim + 1}']:
+        times: Float['b n']
+    ) -> Float['b n {self.dim + 1}']:
 
-        freqs = einx.multiply('i, j -> i j', times, self.weights) * 2 * torch.pi
-        fourier_embed, _ = pack((times, freqs.sin(), freqs.cos()), 'b *')
+        freqs = einx.multiply('... i, j -> ... i j', times, self.weights) * 2 * torch.pi
+        fourier_embed, _ = pack((times, freqs.sin(), freqs.cos()), 'b n *')
         return fourier_embed
 
 # adaptive layernorm and ada-ln zero rolled into one wrapper
@@ -428,7 +428,11 @@ class Transfusion(Module):
 
         assert len(modalities) == batch
 
-        is_modalities = modalities_tensor_to_is_modality_mask(seq_len, modalities)
+        modalities_tensor = modalities_to_tensor(modalities)
+
+        num_modalities = modalities_tensor.shape[-2]
+
+        is_modalities = modalities_tensor_to_is_modality_mask(seq_len, modalities_tensor)
 
         is_any_modality = reduce(is_modalities, 'b m n -> b n', 'any')
 
@@ -439,10 +443,11 @@ class Transfusion(Module):
         # noise the modality tokens
 
         if not exists(times):
-            times = torch.rand((batch,), device = device)
+            times = torch.rand((batch, num_modalities), device = device)
 
         if return_loss:
-            padded_times = rearrange(times, 'b -> b 1 1')
+            times = einsum(is_modalities.float(), times, 'b m n, b m -> b n')
+            padded_times = rearrange(times, 'b n -> b n 1')
             noise = torch.randn_like(modality_tokens)
 
             modality_tokens = modality_tokens * padded_times + noise * (1. - padded_times)
@@ -460,7 +465,7 @@ class Transfusion(Module):
         embed = self.transformer(
             tokens,
             times = times,
-            modalities = modalities
+            modalities = modalities_tensor
         )
 
         # text unembedding
