@@ -6,6 +6,44 @@ Pytorch implementation of [Transfusion](https://www.arxiv.org/abs/2408.11039), "
 
 Once completed, will also extend this to flow matching, as well as audio, video, perhaps even policies.
 
+## Install
+
+```bash
+$ pip install transfusion-pytorch
+```
+
+## Usage
+
+```python
+import torch
+from transfusion_pytorch import Transfusion
+
+model = Transfusion(
+    num_text_tokens = 256,
+    transformer = dict(
+        dim = 512,
+        depth = 8
+    )
+)
+
+text_ids = torch.randint(0, 256, (1, 1024))
+
+modality_tokens = [[
+    torch.randn(1, 6, 512),
+    torch.randn(1, 4, 512)
+]]
+
+modalities = [[(2, 6), (10, 4)]]
+
+loss, breakdown = model(
+    text_ids,
+    modality_tokens = modality_tokens,
+    modalities = modalities
+)
+
+loss.backward()
+```
+
 ## Citations
 
 ```bibtex
