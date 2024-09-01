@@ -4,7 +4,7 @@
 
 Pytorch implementation of [Transfusion](https://www.arxiv.org/abs/2408.11039), "Predict the Next Token and Diffuse Images with One Multi-Modal Model", from MetaAI.
 
-Once completed, will also extend this to flow matching, as well as audio and video.
+Once completed, will also extend this to flow matching, as well as audio, video, perhaps even policies.
 
 ## Citations
 

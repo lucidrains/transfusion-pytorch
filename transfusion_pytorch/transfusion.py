@@ -81,6 +81,23 @@ def transfusion_attn_mask(modalities: list[tuple[int, int]]):
 
 # functions for managing modality token mask
 
+def order_modalities_by_seq_offset(
+    modalities: Int['b m 2']
+) -> tuple[Int['b m 2'], Int['b m']]:
+
+    offsets, lengths = modalities.unbind(dim = -1)
+
+    no_modality_mask = lengths <= 0 # there may be uneven number of modalities per batch sample
+    offsets_to_sort = offsets.masked_fill(no_modality_mask, 1e10)
+    _, sorted_indices = offsets_to_sort.sort(dim = -1)
+
+    # sort by ascending offset and do a final mask of both offset and length to 0
+
+    modalities = einx.get_at('b [mi] ..., b mo -> b mo ...', modalities, sorted_indices)
+    modalities = einx.where('b m, b m ..., -> b m ...', ~no_modality_mask, modalities, 0.)
+
+    return modalities, sorted_indices
+
 def modalities_to_tensor(
     modalities: RawModalityInfo,
     pad_value = 0
@@ -411,7 +428,7 @@ class Transfusion(Module):
         self,
         text: Int['b n'],
         modality_tokens: Float['b n d'],
-        modalities: RawModalityInfo,
+        modalities: RawModalityInfo | Int['b m 2'],
         times: Int['b'] | None = None,
         return_loss = True
 
@@ -431,11 +448,14 @@ class Transfusion(Module):
 
         assert len(modalities) == batch
 
-        modalities_tensor = modalities_to_tensor(modalities)
+        if isinstance(modalities, list):
+            modalities = modalities_to_tensor(modalities)
 
-        num_modalities = modalities_tensor.shape[-2]
+        modalities, sorted_indices = order_modalities_by_seq_offset(modalities)
 
-        is_modalities = modalities_tensor_to_is_modality_mask(seq_len, modalities_tensor)
+        num_modalities = modalities.shape[-2]
+
+        is_modalities = modalities_tensor_to_is_modality_mask(seq_len, modalities)
 
         is_any_modality = reduce(is_modalities, 'b m n -> b n', 'any')
 
@@ -468,7 +488,7 @@ class Transfusion(Module):
         embed = self.transformer(
             tokens,
             times = times,
-            modalities = modalities_tensor
+            modalities = modalities
         )
 
         # text unembedding
