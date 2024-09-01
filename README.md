@@ -33,12 +33,15 @@ modality_tokens = [[
     torch.randn(1, 4, 512)
 ]]
 
-modalities = [[(2, 6), (10, 4)]]
+modality_positions = [[
+    (2, 6),
+    (10, 4)
+]] # (offset, length)
 
 loss, breakdown = model(
     text_ids,
     modality_tokens = modality_tokens,
-    modalities = modalities
+    modality_positions = modality_positions
 )
 
 loss.backward()
