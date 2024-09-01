@@ -492,7 +492,7 @@ class Transfusion(Module):
         text: Int['b n'],
         modality_tokens: list[list[Float['b _ d']]] | Float['b n d'],
         modality_positions: RawModalityPositions | Int['b m 2'],
-        times: Int['b'] | None = None,
+        times: Float['b m'] | None = None,
         return_loss = True
     ) -> (
         Float['b n l'] |
