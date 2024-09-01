@@ -79,7 +79,18 @@ def transfusion_attn_mask(modalities: list[tuple[int, int]]):
 
     return mask_mod
 
-# functions for managing modality token mask
+# converting a raw list of modality offsets and lengths to tensor
+
+def modalities_to_tensor(
+    modalities: RawModalityInfo,
+    pad_value = 0
+) -> Int['b m 2']:
+
+    modalities: list[Tensor] = [tensor(modality) for modality in modalities]
+    modalities = pad_sequence(modalities, padding_value = pad_value)
+    return modalities
+
+# sanitizing modalities tensor, making sure it is ordered
 
 def order_modalities_by_seq_offset(
     modalities: Int['b m 2']
@@ -98,14 +109,32 @@ def order_modalities_by_seq_offset(
 
     return modalities, sorted_indices
 
-def modalities_to_tensor(
-    modalities: RawModalityInfo,
-    pad_value = 0
-) -> Int['b m 2']:
+# modality tokens are given as list of tensors, can be then be embedded into the modality tokens for attending alongside text tokens
 
-    modalities: list[Tensor] = [tensor(modality) for modality in modalities]
-    modalities = pad_sequence(modalities, padding_value = pad_value)
-    return modalities
+def embed_modality_tokens(
+    seq_len: int,
+    dim: int,
+    modality_tokens: list[list[Float['b _ d']]],
+    modalities: Int['b m 2']
+) -> Float['b n d']:
+
+    batch, device = modalities.shape[0], modalities.device
+
+    output = torch.zeros((batch, seq_len, dim), device = device)
+
+    for batch_ind, (one_modality, one_modality_token) in enumerate(zip(modalities, modality_tokens)):
+        for (offset, length), batch_modality_token in zip(one_modality, one_modality_token):
+            if length <= 0:
+                continue
+            modality_shape = batch_modality_token.shape
+
+            assert length == modality_shape[1], f'received a modality of shape {modality_shape} but sequence length in modalities info is {length}'
+
+            output[batch_ind, offset:(offset + length)] = batch_modality_token
+
+    return output
+
+# functions for managing modality token mask
 
 def modalities_tensor_to_is_modality_mask(
     seq_len: int,
@@ -410,6 +439,7 @@ class Transfusion(Module):
 
         self.transformer = transformer
         dim = transformer.dim
+        self.dim = dim
 
         # embeddings and un-embeddings
 
@@ -427,11 +457,10 @@ class Transfusion(Module):
     def forward(
         self,
         text: Int['b n'],
-        modality_tokens: Float['b n d'],
+        modality_tokens: list[list[Float['b _ d']]] | Float['b n d'],
         modalities: RawModalityInfo | Int['b m 2'],
         times: Int['b'] | None = None,
         return_loss = True
-
     ) -> (
         Float['b n l'] |
         tuple[Float[''], LossBreakdown]
@@ -450,6 +479,13 @@ class Transfusion(Module):
 
         if isinstance(modalities, list):
             modalities = modalities_to_tensor(modalities)
+
+        # embed the list of modality tokens into a sequence of Float['b n d'] at right offsets and lengths as dictated by modalities info tensor
+
+        if isinstance(modality_tokens, list):
+            modality_tokens = embed_modality_tokens(seq_len, self.dim, modality_tokens, modalities)
+
+        # sort the modalities tensor and sanitize, readying for noising of modalities
 
         modalities, sorted_indices = order_modalities_by_seq_offset(modalities)
 
