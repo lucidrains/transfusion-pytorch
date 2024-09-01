@@ -27,6 +27,7 @@ dependencies = [
     'einx>=0.3.0',
     'einops>=0.8.0',
     'jaxtyping',
+    'rotary_embedding_torch',
     'torch>=2.0',
 ]
 

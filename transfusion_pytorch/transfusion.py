@@ -26,6 +26,8 @@ from einops.layers.torch import Rearrange
 
 from transfusion_pytorch.tensor_typing import Float, Int, Bool
 
+from rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
+
 pad_sequence = partial(pad_sequence, batch_first = True)
 
 # constants
@@ -109,6 +111,23 @@ def order_modality_positions_by_seq_offset(
 
     return modalities, sorted_indices
 
+# deriving relative positions from modality positions
+# ex. given a sequence of 10 with an image at offset 3 with length 4 - [t] [t] [t] [i] [i] [i] [i] [t] [t] [t]
+# relative positions for rotary will be [0] [1] [2] [3] [3] [3] [3] [4] [5] [6]
+# rationale is that each modality will need the same position so there is no distance when conducting bidirectional attention, but should still have a relative distance to other text tokens and modalities
+
+def derive_rotary_positions_from_modality_positions(
+    seq_len: int,
+    modalities: Int['b m 2']
+) -> Int['b n']:
+
+    device = modalities.device
+
+    modality_mask = modality_positions_to_is_modality_mask(seq_len, modalities, offset = torch.tensor([1, -1]))
+    is_any_modality = modality_mask.any(dim = 1)
+
+    return torch.arange(seq_len, device = device) - is_any_modality.cumsum(dim = -1)
+
 # modality tokens are given as list of tensors, can be then be embedded into the modality tokens for attending alongside text tokens
 
 def embed_modality_tokens(
@@ -139,10 +158,14 @@ def embed_modality_tokens(
 def modality_positions_to_is_modality_mask(
     seq_len: int,
     modalities: RawModalityPositions | Int['b m 2'],
+    offset: Int['2'] | None = None,
 ) -> Bool['b m n']:
 
     if isinstance(modalities, list):
-        modalities = modalities_to_tensor(modalities)
+        modalities = modality_positions_to_tensor(modalities)
+
+    if exists(offset):
+        modalities = modalities + offset.to(modalities)
 
     left, right = modalities.cumsum(dim = -1).unbind(dim = -1)
 
@@ -322,11 +345,15 @@ class Attention(Module):
     def forward(
         self,
         x,
-        attn_mask = None
+        attn_mask = None,
+        rotary_emb: Tensor | None = None
     ):
         x = self.norm(x)
 
         q, k, v = self.to_qkv(x)
+
+        if exists(rotary_emb):
+            q, k = tuple(apply_rotary_emb(rotary_emb, t) for t in (q, k))
 
         q = q * self.scale
         sim = einsum(q, k, 'b h i d, b h j d -> b h i j')
@@ -360,6 +387,7 @@ class Transformer(Module):
     ):
         super().__init__()
         self.dim = dim
+        self.dim_head = dim_head
 
         self.to_time_cond = nn.Sequential(
             RandomFourierEmbed(dim),
@@ -388,7 +416,8 @@ class Transformer(Module):
         times: Float[''] | Float['b'] | Float['b n'],
         attn_mask: Bool['b i j'] | None = None,
         modality_positions: RawModalityPositions | Int['b n 2'] | None = None,
-        is_any_modality: Bool['b n'] | None = None
+        is_any_modality: Bool['b n'] | None = None,
+        rotary_emb: Tensor | None = None
     ):
         seq_len, device = x.shape[-2], x.device
         assert exists(attn_mask) ^ exists(modality_positions)
@@ -414,7 +443,7 @@ class Transformer(Module):
         # transformer layers as usual, using mask from above
 
         for attn, ff in self.layers:
-            x = attn(x, attn_mask = attn_mask, **adaptive_kwargs) + x
+            x = attn(x, attn_mask = attn_mask, rotary_emb = rotary_emb, **adaptive_kwargs) + x
             x = ff(x, **adaptive_kwargs) + x
 
         return self.norm(x)
@@ -438,8 +467,12 @@ class Transfusion(Module):
             transformer = Transformer(**transformer)
 
         self.transformer = transformer
-        dim = transformer.dim
+        dim, dim_head = transformer.dim, transformer.dim_head
         self.dim = dim
+
+        # relative positions
+
+        self.rotary_emb = RotaryEmbedding(transformer.dim_head)
 
         # embeddings and un-embeddings
 
@@ -519,11 +552,18 @@ class Transfusion(Module):
 
         tokens = einx.where('b n, b n d, b n d', is_any_modality, modality_tokens, text_tokens)
 
+        # derive rotary positions
+
+        rotary_positions = derive_rotary_positions_from_modality_positions(seq_len, modality_positions)
+
+        rotary_emb = self.rotary_emb(rotary_positions)
+
         # attention
 
         embed = self.transformer(
             tokens,
             times = times,
+            rotary_emb = rotary_emb,
             modality_positions = modality_positions
         )
 
