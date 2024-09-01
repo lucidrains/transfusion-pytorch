@@ -30,7 +30,7 @@ pad_sequence = partial(pad_sequence, batch_first = True)
 
 # constants
 
-RawModalityInfo = list[list[tuple[int, int]]]
+RawModalityPositions = list[list[tuple[int, int]]]
 
 LossBreakdown = namedtuple('LossBreakdown', ['total', 'text', 'diffusion'])
 
@@ -81,8 +81,8 @@ def transfusion_attn_mask(modalities: list[tuple[int, int]]):
 
 # converting a raw list of modality offsets and lengths to tensor
 
-def modalities_to_tensor(
-    modalities: RawModalityInfo,
+def modality_positions_to_tensor(
+    modalities: RawModalityPositions,
     pad_value = 0
 ) -> Int['b m 2']:
 
@@ -92,7 +92,7 @@ def modalities_to_tensor(
 
 # sanitizing modalities tensor, making sure it is ordered
 
-def order_modalities_by_seq_offset(
+def order_modality_positions_by_seq_offset(
     modalities: Int['b m 2']
 ) -> tuple[Int['b m 2'], Int['b m']]:
 
@@ -136,9 +136,9 @@ def embed_modality_tokens(
 
 # functions for managing modality token mask
 
-def modalities_tensor_to_is_modality_mask(
+def modality_positions_to_is_modality_mask(
     seq_len: int,
-    modalities: RawModalityInfo | Int['b m 2'],
+    modalities: RawModalityPositions | Int['b m 2'],
 ) -> Bool['b m n']:
 
     if isinstance(modalities, list):
@@ -157,7 +157,7 @@ def modalities_tensor_to_is_modality_mask(
 
 def naive_attn_mask(
     seq_len: int,
-    modalities: RawModalityInfo | Int['b m 2'],
+    modalities: RawModalityPositions | Int['b m 2'],
     device = None
 ) -> Bool['b i j']:
 
@@ -387,11 +387,11 @@ class Transformer(Module):
         x,
         times: Float[''] | Float['b'] | Float['b n'],
         attn_mask: Bool['b i j'] | None = None,
-        modalities: RawModalityInfo | Int['b n 2'] | None = None,
+        modality_positions: RawModalityPositions | Int['b n 2'] | None = None,
         is_any_modality: Bool['b n'] | None = None
     ):
         seq_len, device = x.shape[-2], x.device
-        assert exists(attn_mask) ^ exists(modalities)
+        assert exists(attn_mask) ^ exists(modality_positions)
 
         # handle time
 
@@ -402,12 +402,12 @@ class Transformer(Module):
 
         # create the specialized mask needed for autoregressive text + bidirectional diffusion attention
 
-        if exists(modalities):
-            attn_mask = naive_attn_mask(seq_len, modalities, device = device)
+        if exists(modality_positions):
+            attn_mask = naive_attn_mask(seq_len, modality_positions, device = device)
 
         if not exists(is_any_modality):
-            assert exists(modalities)
-            is_any_modality = modalities_tensor_to_is_modality_mask(seq_len, modalities).any(dim = 1)
+            assert exists(modality_positions)
+            is_any_modality = modality_positions_to_is_modality_mask(seq_len, modality_positions).any(dim = 1)
 
         adaptive_kwargs = dict(cond = cond, is_any_modality = is_any_modality)
 
@@ -458,7 +458,7 @@ class Transfusion(Module):
         self,
         text: Int['b n'],
         modality_tokens: list[list[Float['b _ d']]] | Float['b n d'],
-        modalities: RawModalityInfo | Int['b m 2'],
+        modality_positions: RawModalityPositions | Int['b m 2'],
         times: Int['b'] | None = None,
         return_loss = True
     ) -> (
@@ -475,23 +475,23 @@ class Transfusion(Module):
 
         batch, seq_len, device = *text.shape, text.device
 
-        assert len(modalities) == batch
+        assert len(modality_positions) == batch
 
-        if isinstance(modalities, list):
-            modalities = modalities_to_tensor(modalities)
+        if isinstance(modality_positions, list):
+            modality_positions = modality_positions_to_tensor(modality_positions)
 
         # embed the list of modality tokens into a sequence of Float['b n d'] at right offsets and lengths as dictated by modalities info tensor
 
         if isinstance(modality_tokens, list):
-            modality_tokens = embed_modality_tokens(seq_len, self.dim, modality_tokens, modalities)
+            modality_tokens = embed_modality_tokens(seq_len, self.dim, modality_tokens, modality_positions)
 
         # sort the modalities tensor and sanitize, readying for noising of modalities
 
-        modalities, sorted_indices = order_modalities_by_seq_offset(modalities)
+        modality_positions, sorted_indices = order_modality_positions_by_seq_offset(modality_positions)
 
-        num_modalities = modalities.shape[-2]
+        num_modalities = modality_positions.shape[-2]
 
-        is_modalities = modalities_tensor_to_is_modality_mask(seq_len, modalities)
+        is_modalities = modality_positions_to_is_modality_mask(seq_len, modality_positions)
 
         is_any_modality = reduce(is_modalities, 'b m n -> b n', 'any')
 
@@ -524,7 +524,7 @@ class Transfusion(Module):
         embed = self.transformer(
             tokens,
             times = times,
-            modalities = modalities
+            modality_positions = modality_positions
         )
 
         # text unembedding
