@@ -415,7 +415,10 @@ class Transfusion(Module):
         times: Int['b'] | None = None,
         return_loss = True
 
-    ) -> Float['b n l'] | Float['']:
+    ) -> (
+        Float['b n l'] |
+        tuple[Float[''], LossBreakdown]
+    ):
 
         # if returning loss, split text for next token prediction
 
