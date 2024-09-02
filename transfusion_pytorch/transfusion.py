@@ -85,10 +85,11 @@ def transfusion_attn_mask(modalities: list[tuple[int, int]]):
 
 def modality_positions_to_tensor(
     modalities: RawModalityPositions,
-    pad_value = 0
+    pad_value = 0,
+    device = None
 ) -> Int['b m 2']:
 
-    modalities: list[Tensor] = [tensor(modality) for modality in modalities]
+    modalities: list[Tensor] = [tensor(modality, device = device) for modality in modalities]
     modalities = pad_sequence(modalities, padding_value = pad_value)
     return modalities
 
@@ -133,7 +134,7 @@ def derive_rotary_positions_from_modality_positions(
 def embed_modality_tokens(
     seq_len: int,
     dim: int,
-    modality_tokens: list[list[Float['b _ d']]],
+    modality_tokens: list[list[Float['_ d']]],
     modalities: Int['b m 2']
 ) -> Float['b n d']:
 
@@ -145,9 +146,10 @@ def embed_modality_tokens(
         for (offset, length), batch_modality_token in zip(one_modality, one_modality_token):
             if length <= 0:
                 continue
+
             modality_shape = batch_modality_token.shape
 
-            assert length == modality_shape[1], f'received a modality of shape {modality_shape} but sequence length in modalities info is {length}'
+            assert length == modality_shape[0], f'received a modality of shape {modality_shape} but sequence length in modalities info is {length}'
 
             output[batch_ind, offset:(offset + length)] = batch_modality_token
 
@@ -159,10 +161,11 @@ def modality_positions_to_is_modality_mask(
     seq_len: int,
     modalities: RawModalityPositions | Int['b m 2'],
     offset: Int['2'] | None = None,
+    device = None
 ) -> Bool['b m n']:
 
     if isinstance(modalities, list):
-        modalities = modality_positions_to_tensor(modalities)
+        modalities = modality_positions_to_tensor(modalities, device = device)
 
     if exists(offset):
         modalities = modalities + offset.to(modalities)
@@ -490,7 +493,7 @@ class Transfusion(Module):
     def forward(
         self,
         text: Int['b n'],
-        modality_tokens: list[list[Float['b _ d']]] | Float['b n d'],
+        modality_tokens: list[list[Float['_ d']]] | Float['b n d'],
         modality_positions: RawModalityPositions | Int['b m 2'],
         times: Float['b m'] | None = None,
         return_loss = True
@@ -511,7 +514,7 @@ class Transfusion(Module):
         assert len(modality_positions) == batch
 
         if isinstance(modality_positions, list):
-            modality_positions = modality_positions_to_tensor(modality_positions)
+            modality_positions = modality_positions_to_tensor(modality_positions, device = device)
 
         # embed the list of modality tokens into a sequence of Float['b n d'] at right offsets and lengths as dictated by modalities info tensor
 
@@ -524,7 +527,7 @@ class Transfusion(Module):
 
         num_modalities = modality_positions.shape[-2]
 
-        is_modalities = modality_positions_to_is_modality_mask(seq_len, modality_positions)
+        is_modalities = modality_positions_to_is_modality_mask(seq_len, modality_positions, device = device)
 
         is_any_modality = reduce(is_modalities, 'b m n -> b n', 'any')
 
@@ -557,6 +560,7 @@ class Transfusion(Module):
         rotary_positions = derive_rotary_positions_from_modality_positions(seq_len, modality_positions)
 
         rotary_emb = self.rotary_emb(rotary_positions)
+        rotary_emb = rearrange(rotary_emb, 'b n d -> b 1 n d')
 
         # attention
 

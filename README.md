@@ -26,16 +26,22 @@ model = Transfusion(
     )
 )
 
-text_ids = torch.randint(0, 256, (1, 1024))
+text_ids = torch.randint(0, 256, (2, 1024))
 
 modality_tokens = [[
-    torch.randn(1, 6, 512),
-    torch.randn(1, 4, 512)
+    torch.randn(6, 512),
+    torch.randn(4, 512)
+], [
+    torch.randn(5, 512),
+    torch.randn(3, 512)
 ]]
 
 modality_positions = [[
     (2, 6),
     (10, 4)
+], [
+    (2, 5),
+    (10, 3)
 ]] # (offset, length)
 
 loss, breakdown = model(
