@@ -459,6 +459,7 @@ class Transfusion(Module):
         *,
         num_text_tokens,
         transformer: dict | Transformer,
+        dim_latent: int | None = None,
         ignore_index = -1,
         diffusion_loss_weight = 1.
     ):
@@ -473,6 +474,14 @@ class Transfusion(Module):
         dim, dim_head = transformer.dim, transformer.dim_head
         self.dim = dim
 
+        # latent and model dimension not the same
+        # make it work for 1 modality for now
+
+        dim_latent = default(dim_latent, dim)
+
+        self.dim_latent = dim_latent
+        self.latent_to_model = nn.Linear(dim_latent, dim) if dim_latent != dim else nn.Identity()
+
         # relative positions
 
         self.rotary_emb = RotaryEmbedding(transformer.dim_head)
@@ -483,7 +492,7 @@ class Transfusion(Module):
 
         self.to_text_logits = nn.Linear(dim, num_text_tokens, bias = False)
 
-        self.to_pred_flow = nn.Linear(dim, dim, bias = False)
+        self.to_pred_flow = nn.Linear(dim, dim_latent, bias = False)
 
         # loss related
 
@@ -493,7 +502,7 @@ class Transfusion(Module):
     def forward(
         self,
         text: Int['b n'],
-        modality_tokens: list[list[Float['_ d']]] | Float['b n d'],
+        modality_tokens: list[list[Float['_ {self.dim_latent}']]] | Float['b n {self.dim_latent}'],
         modality_positions: RawModalityPositions | Int['b m 2'],
         times: Float['b m'] | None = None,
         return_loss = True
@@ -519,7 +528,7 @@ class Transfusion(Module):
         # embed the list of modality tokens into a sequence of Float['b n d'] at right offsets and lengths as dictated by modalities info tensor
 
         if isinstance(modality_tokens, list):
-            modality_tokens = embed_modality_tokens(seq_len, self.dim, modality_tokens, modality_positions)
+            modality_tokens = embed_modality_tokens(seq_len, self.dim_latent, modality_tokens, modality_positions)
 
         # sort the modalities tensor and sanitize, readying for noising of modalities
 
@@ -550,6 +559,10 @@ class Transfusion(Module):
             # the flow is the (data - noise)
 
             flow = modality_tokens - noise
+
+        # project the modality tokens to model
+
+        modality_tokens = self.latent_to_model(modality_tokens)
 
         # intersperse the modalities with the text for the joint transformer + diffusion system
 
