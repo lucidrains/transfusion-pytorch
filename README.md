@@ -14,6 +14,50 @@ $ pip install transfusion-pytorch
 
 ## Usage
 
+One modality, say images
+
+```python
+import torch
+from transfusion_pytorch import Transfusion
+
+model = Transfusion(
+    num_text_tokens = 256,
+    dim_latent = 192,
+    transformer = dict(
+        dim = 512,
+        depth = 8
+    )
+)
+
+text_ids = torch.randint(0, 256, (2, 1024))
+
+modality_tokens = [[
+    torch.randn(6, 192),
+    torch.randn(4, 192)
+], [
+    torch.randn(5, 192),
+    torch.randn(3, 192)
+]]
+
+modality_positions = [[
+    (2, 6),
+    (10, 4)
+], [
+    (2, 5),
+    (10, 3)
+]] # (offset, length)
+
+loss, breakdown = model(
+    text_ids,
+    modality_tokens = modality_tokens,
+    modality_positions = modality_positions
+)
+
+loss.backward()
+```
+
+Multiple modalities
+
 ```python
 import torch
 from transfusion_pytorch import Transfusion
