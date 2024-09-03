@@ -184,24 +184,21 @@ def modality_positions_to_is_modality_mask(
         offset = F.pad(offset, (1, 0))
         modalities = modalities + offset.to(modalities)
 
-    is_modalities = []
+    seq = torch.arange(seq_len, device = device)
+    type_seq = torch.arange(num_modalities, device = device)
 
-    for modality_id in range(num_modalities):
-        one_modality_type_mask = modalities[..., 0] == modality_id
-        one_modality = modalities.masked_fill(~one_modality_type_mask[..., None], 0)
+    modality_types = modalities[..., 0]
 
-        left, right = one_modality[..., 1:].cumsum(dim = -1).unbind(dim = -1)
+    left, right = modalities[..., 1:].cumsum(dim = -1).unbind(dim = -1)
 
-        seq = torch.arange(seq_len, device = device)
+    is_instance_for_type = einx.equal('b m, t -> b t m', modality_types, type_seq)
 
-        is_modality = (
-            einx.greater_equal('i, b m -> b m i', seq, left) &
-            einx.less('j, b m -> b m j', seq, right)
-        )
+    is_modality_along_seq = (
+        einx.greater_equal('i, b m -> b m i', seq, left) &
+        einx.less('j, b m -> b m j', seq, right)
+    )
 
-        is_modalities.append(is_modality)
-
-    return torch.stack(is_modalities, dim = 1)
+    return einx.logical_and('b t m, b m n -> b t m n', is_instance_for_type, is_modality_along_seq)
 
 def naive_attn_mask(
     seq_len: int,
