@@ -243,7 +243,7 @@ class AdaptiveWrapper(Module):
         # and for output will use layerscale
 
         self.layernorm_gamma = nn.Parameter(torch.zeros(dim))
-        self.layerscale = nn.Parameter(torch.ones(dim))
+        self.layerscale = nn.Parameter(torch.zeros(dim))
 
         # modalities will get the adaptive layernorm + ada-ln zero
 
@@ -281,7 +281,7 @@ class AdaptiveWrapper(Module):
 
         # take care of conditioning output separately for text vs modality
 
-        text_out = out * self.layerscale
+        text_out = out * (self.layerscale + 1.)
         modalities_out = out * self.to_ada_ln_zero(cond).sigmoid()
 
         return torch.where(is_any_modality, modalities_out, text_out)
