@@ -636,39 +636,54 @@ class Transfusion(Module):
         if not return_loss:
             return text_logits
 
+        # calculate total tokens for weighing the loss
+
+        total_tokens = (text_labels != self.ignore_index).sum()
+
         # text autoregressive loss
+
+        text_labels = text_labels.masked_fill(is_any_modality, self.ignore_index)
 
         text_loss = F.cross_entropy(
             rearrange(text_logits, 'b n l -> b l n'),
             text_labels,
-            ignore_index = self.ignore_index,
-            reduction = 'none'
+            ignore_index = self.ignore_index
         )
 
-        text_loss = text_loss[~is_any_modality].mean()
+        text_loss_weight = (text_labels != self.ignore_index).sum() / total_tokens
 
         # diffusion loss
 
         pred_flows = [fn(embed) for fn in self.model_to_latent_preds]
 
         diffusion_losses = []
+        modality_loss_weights = []
 
-        for flow, pred_flow in zip(flows, pred_flows):
+        for flow, pred_flow, is_one_modality in zip(flows, pred_flows, is_modalities.unbind(dim = 1)):
+
             diffusion_loss = F.mse_loss(
                 pred_flow,
                 flow,
                 reduction = 'none'
             )
 
-            diffusion_losses.append(diffusion_loss.mean())
+            is_one_modality = reduce(is_one_modality, 'b m n -> b n', 'any')
+
+            diffusion_loss = diffusion_loss[is_one_modality].mean()
+
+            modality_loss_weight = is_one_modality.sum() / total_tokens
+
+            modality_loss_weights.append(modality_loss_weight)
+
+            diffusion_losses.append(diffusion_loss)
 
         total_diffusion_loss = sum(diffusion_losses)
 
         # only the token positions that are not modalities have autoregressive loss
 
         total_loss = (
-            text_loss +
-            total_diffusion_loss * self.diffusion_loss_weight
+            text_loss * text_loss_weight +
+            sum([loss * weight for loss, weight in zip(diffusion_losses, modality_loss_weights)]) * self.diffusion_loss_weight
         )
 
         return total_loss, LossBreakdown(total_loss, text_loss, diffusion_losses)
