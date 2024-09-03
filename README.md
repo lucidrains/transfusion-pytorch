@@ -20,7 +20,7 @@ from transfusion_pytorch import Transfusion
 
 model = Transfusion(
     num_text_tokens = 256,
-    dim_latent = 384,
+    dim_latent = (384, 192),
     transformer = dict(
         dim = 512,
         depth = 8
@@ -31,19 +31,19 @@ text_ids = torch.randint(0, 256, (2, 1024))
 
 modality_tokens = [[
     torch.randn(6, 384),
-    torch.randn(4, 384)
+    torch.randn(4, 192)
 ], [
-    torch.randn(5, 384),
+    torch.randn(5, 192),
     torch.randn(3, 384)
 ]]
 
 modality_positions = [[
-    (2, 6),
-    (10, 4)
+    (0, 2, 6),
+    (1, 10, 4)
 ], [
-    (2, 5),
-    (10, 3)
-]] # (offset, length)
+    (1, 2, 5),
+    (0, 10, 3)
+]] # (type, offset, length)
 
 loss, breakdown = model(
     text_ids,
