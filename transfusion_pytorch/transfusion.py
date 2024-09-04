@@ -710,7 +710,7 @@ class Transfusion(Module):
 
         total_loss = (
             text_loss * text_loss_weight +
-            sum([loss * weight for loss, weight in zip(diffusion_losses, modality_loss_weights)]) * self.diffusion_loss_weight
+            (torch.stack(diffusion_losses) * torch.stack(modality_loss_weights)).sum() * self.diffusion_loss_weight
         )
 
         return total_loss, LossBreakdown(total_loss, text_loss, diffusion_losses)
