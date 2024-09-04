@@ -48,6 +48,9 @@ def exists(v):
 def default(v, d):
     return v if exists(v) else d
 
+def identity(t):
+    return t
+
 def first(it):
     return it[0]
 
@@ -477,6 +480,7 @@ class Transfusion(Module):
         num_text_tokens,
         transformer: dict | Transformer,
         dim_latent: int | tuple[int, ...] | None = None,
+        modality_token_transform: tuple[str | callable, ...] | None = None,
         ignore_index = -1,
         diffusion_loss_weight = 1.
     ):
@@ -497,6 +501,13 @@ class Transfusion(Module):
         dim_latent = default(dim_latent, dim)
 
         self.dim_latents = cast_tuple(dim_latent)
+
+        # modality transforms
+
+        modality_token_transform = [default(transform, identity) for transform in modality_token_transform]
+        self.modality_token_transform = [Rearrange(maybe_einops_eq) if isinstance(maybe_einops_eq, str) else maybe_einops_eq for maybe_einops_eq in modality_token_transform]
+
+        # number of modalities
 
         self.num_modalities = len(self.dim_latents)
 
@@ -552,6 +563,25 @@ class Transfusion(Module):
 
         if torch.is_tensor(modality_tokens):
             modality_tokens = [modality_tokens]
+
+        # transform the modality tokens from the vae encoder output into (batch, seq, feature) shape, if needed
+
+        transformed_modality_tokens = []
+
+        for batch_modality_tokens, batch_modality_position in zip(modality_tokens, modality_positions):
+            batch_transformed = []
+
+            for one_tokens, one_position in zip(batch_modality_tokens, batch_modality_position):
+                modality_type, _, _ = one_position
+                post_encode_transform = self.modality_token_transform[modality_type]
+                transformed = post_encode_transform(one_tokens)
+                batch_transformed.append(transformed)
+
+            transformed_modality_tokens.append(batch_transformed)
+
+        modality_tokens = transformed_modality_tokens
+
+        # embed the modality tokens into one Tensor if not given as one
 
         if isinstance(modality_tokens, list) and isinstance(first(modality_tokens), list): # detect list[list[tensor]]
             modality_tokens = [embed_modality_tokens(seq_len, dim_latent, modality_tokens, modality_positions, modality_id) for modality_id, dim_latent in enumerate(self.dim_latents)]
