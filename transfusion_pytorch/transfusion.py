@@ -31,6 +31,13 @@ from rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
 
 pad_sequence = partial(pad_sequence, batch_first = True)
 
+# maybe flex attention
+
+try:
+    from torch.nn.attention.flex_attention import flex_attention, create_block_mask
+except ImportError:
+    flex_attention = None
+
 # constants
 
 RawModalityPositions = list[list[tuple[int, int]]]
@@ -77,22 +84,32 @@ def causal(b, h, q_idx, kv_idx):
 def modality(offset, length):
 
     def mask_fn(b, h, q_idx, kv_idx):
-        return q_idx >= offset & kv_idx < (offset + length)
+        return (q_idx >= offset) & (kv_idx < (offset + length))
 
     return mask_fn
 
-def transfusion_attn_mask(modalities: list[tuple[int, int]]):
+def transfusion_attn_mask(modalities: Int['b m 3']):
+    modalities = modalities.long()
 
-    def mask_mod(*args):
-        is_causal = causal(*args)
+    def mask_mod(b, h, q_idx, kv_idx):
+        mask = causal(b, h, q_idx, kv_idx)
 
-        modality_mask_mods = [modality(*modality_coors_info) for modality_coors_info in modalities]
+        modality_batch = modalities[b]
 
-        is_modality = any([fn(*args) for fn in modality_mask_mods])
+        for _, offset, length in modality_batch:
+            mask = mask | modality(offset, length)(b, h, q_idx, kv_idx)
 
-        return is_causal | is_modality
+        return mask
 
     return mask_mod
+
+def softcap_score_mod(softcap):
+    def inner(score, b, h, q_idx, kv_idx):
+        score = score / softcap
+        score = torch.tanh(score)
+        score = score * softcap
+        return score
+    return inner
 
 # converting a raw list of modality offsets and lengths to tensor
 
@@ -343,10 +360,14 @@ class Attention(Module):
         heads = 8,
         dropout = 0.,
         softcap_value = 50.,
+        use_flex_attn = False
     ):
         super().__init__()
         self.scale = dim_head ** -0.5
         dim_inner = dim_head * heads
+
+        assert not (use_flex_attn and not exists(flex_attention)), 'flex attention is only available on torch 2.5.0 (nightly) onwards'
+        self.use_flex_attn = use_flex_attn
 
         self.norm = RMSNorm(dim)
 
@@ -367,30 +388,49 @@ class Attention(Module):
     def forward(
         self,
         x,
-        attn_mask = None,
-        rotary_emb: Tensor | None = None
+        attn_mask: Tensor | None = None,
+        rotary_emb: Tensor | None = None,
+        block_mask = None,
     ):
+        assert not (exists(block_mask) and exists(attn_mask))
+
         x = self.norm(x)
 
         q, k, v = self.to_qkv(x)
 
+        # rotary embeddings
+
         if exists(rotary_emb):
             q, k = tuple(apply_rotary_emb(rotary_emb, t) for t in (q, k))
 
-        q = q * self.scale
-        sim = einsum(q, k, 'b h i d, b h j d -> b h i j')
+        # whether to use flex attention or not
 
-        sim = softclamp(sim, self.softcap_value)
+        if self.use_flex_attn:
 
-        if exists(attn_mask):
-            mask_value = -torch.finfo(sim.dtype).max
-            sim = einx.where('b i j, b h i j, -> b h i j', attn_mask, sim, mask_value)
+            flex_attn_kwargs = dict(block_mask = block_mask)
 
-        attn = sim.softmax(dim = -1)
+            if self.softcap_value > 0.:
+                flex_attn_kwargs.update(score_mod = softcap_score_mod(self.softcap_value))
 
-        attn = self.dropout(attn)
+            out = flex_attention(q, k, v, **flex_attn_kwargs)
 
-        out = einsum(attn, v, 'b h i j, b h j d -> b h i d')
+        else:
+            q = q * self.scale
+            sim = einsum(q, k, 'b h i d, b h j d -> b h i j')
+
+            sim = softclamp(sim, self.softcap_value)
+
+            if exists(attn_mask):
+                mask_value = -torch.finfo(sim.dtype).max
+                sim = einx.where('b i j, b h i j, -> b h i j', attn_mask, sim, mask_value)
+
+            attn = sim.softmax(dim = -1)
+
+            attn = self.dropout(attn)
+
+            out = einsum(attn, v, 'b h i j, b h j d -> b h i d')
+
+        # combine heads and out
 
         return self.to_out(out)
 
@@ -405,9 +445,12 @@ class Transformer(Module):
         dropout = 0.,
         ff_expansion_factor = 4,
         attn_kwargs: dict = dict(),
-        ff_kwargs: dict = dict()
+        ff_kwargs: dict = dict(),
+        use_flex_attn = False
     ):
         super().__init__()
+        self.use_flex_attn = use_flex_attn
+
         self.dim = dim
         self.dim_head = dim_head
 
@@ -420,7 +463,7 @@ class Transformer(Module):
         layers = ModuleList([])
 
         for _ in range(depth):
-            attn = Attention(dim = dim, dim_head = dim_head, heads = heads, dropout = dropout, **attn_kwargs)
+            attn = Attention(dim = dim, dim_head = dim_head, heads = heads, dropout = dropout, use_flex_attn = use_flex_attn, **attn_kwargs)
 
             ff = FeedForward(dim = dim, expansion_factor = ff_expansion_factor, **ff_kwargs)
 
@@ -453,8 +496,16 @@ class Transformer(Module):
 
         # create the specialized mask needed for autoregressive text + bidirectional diffusion attention
 
+        attn_mask_kwargs = dict()
+
         if exists(modality_positions):
-            attn_mask = naive_attn_mask(seq_len, modality_positions, device = device)
+            if self.use_flex_attn:
+                transfusion_mask_fn = transfusion_attn_mask(modality_positions)
+                block_mask = create_block_mask(transfusion_mask_fn, B = None, H = None, Q_LEN = seq_len, KV_LEN = seq_len, device = device)
+                attn_mask_kwargs.update(block_mask = block_mask)
+            else:
+                attn_mask = naive_attn_mask(seq_len, modality_positions, device = device)
+                attn_mask_kwargs.update(attn_mask = attn_mask)
 
         if not exists(is_any_modality):
             assert exists(modality_positions)
@@ -466,7 +517,7 @@ class Transformer(Module):
         # transformer layers as usual, using mask from above
 
         for attn, ff in self.layers:
-            x = attn(x, attn_mask = attn_mask, rotary_emb = rotary_emb, **adaptive_kwargs) + x
+            x = attn(x, rotary_emb = rotary_emb, **attn_mask_kwargs, **adaptive_kwargs) + x
             x = ff(x, **adaptive_kwargs) + x
 
         return self.norm(x)
@@ -482,7 +533,7 @@ class Transfusion(Module):
         dim_latent: int | tuple[int, ...] | None = None,
         modality_token_transform: tuple[str | callable, ...] | None = None,
         ignore_index = -1,
-        diffusion_loss_weight = 1.
+        diffusion_loss_weight = 1.,
     ):
         super().__init__()
 
@@ -492,7 +543,8 @@ class Transfusion(Module):
             transformer = Transformer(**transformer)
 
         self.transformer = transformer
-        dim, dim_head = transformer.dim, transformer.dim_head
+        dim = transformer.dim
+
         self.dim = dim
 
         # latent and model dimension not the same
@@ -703,8 +755,6 @@ class Transfusion(Module):
             modality_loss_weights.append(modality_loss_weight)
 
             diffusion_losses.append(diffusion_loss)
-
-        total_diffusion_loss = sum(diffusion_losses)
 
         # only the token positions that are not modalities have autoregressive loss
 
