@@ -585,17 +585,54 @@ class Transfusion(Module):
         self.ignore_index = ignore_index
         self.diffusion_loss_weight = diffusion_loss_weight
 
+    @property
+    def device(self):
+        return next(self.parameters()).device
+
     def forward(
         self,
-        text: Int['b n'],
-        modality_tokens: list[list[Float['_ _']]] | list[Float['b n _']] | Float['b n _'],
-        modality_positions: RawModalityPositions | Int['b m 2'] | Int['b m 3'],
+        modalities: list[list[Int['_'] | Float['_ _']]],
         times: Float['b m'] | None = None,
-        return_loss = True
+        return_loss = True,
+        return_breakdown = False
     ) -> (
         Float['b n l'] |
+        Float[''] |
         tuple[Float[''], LossBreakdown]
     ):
+        device = self.device
+
+        # process list of text and modalities interspersed with one another
+
+        modality_positions = []
+        modality_tokens = []
+        text = []
+
+        for batch_modalities in modalities:
+            batch_modality_positions = []
+            batch_modality_tokens = []
+            batch_text = []
+
+            for modality in batch_modalities:
+                is_text = modality.dtype in (torch.long, torch.int)
+
+                length = modality.shape[0]
+                offset = 0
+
+                if is_text:
+                    batch_text.append(modality)
+                else:
+                    batch_text.append(torch.full((length,), -1, device = device))
+                    batch_modality_tokens.append(modality)
+                    batch_modality_positions.append((offset, length))
+
+                offset += length
+
+            text.append(torch.cat(batch_text))
+            modality_tokens.append(batch_modality_tokens)
+            modality_positions.append(batch_modality_positions)
+
+        text = pad_sequence(text, padding_value = -1)
 
         # if returning loss, split text for next token prediction
 
@@ -652,6 +689,8 @@ class Transfusion(Module):
         is_any_modality = reduce(is_modalities, 'b t m n -> b n', 'any')
 
         # embed text
+
+        text = text.masked_fill(text == -1, 0)
 
         text_tokens = self.text_embed(text)
 
@@ -765,5 +804,8 @@ class Transfusion(Module):
             text_loss * text_loss_weight +
             (torch.stack(diffusion_losses) * torch.stack(modality_loss_weights)).sum() * self.diffusion_loss_weight
         )
+
+        if not return_breakdown:
+            return total_loss
 
         return total_loss, LossBreakdown(total_loss, text_loss, diffusion_losses)

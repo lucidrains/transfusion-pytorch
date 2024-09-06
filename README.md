@@ -17,83 +17,24 @@ $ pip install transfusion-pytorch
 One modality, say images
 
 ```python
-import torch
+from torch import randint, randn
 from transfusion_pytorch import Transfusion
 
 model = Transfusion(
     num_text_tokens = 256,
-    dim_latent = 192,
+    dim_latent = 384,
     transformer = dict(
         dim = 512,
         depth = 8
     )
 )
 
-text_ids = torch.randint(0, 256, (2, 1024))
+text_and_images = [
+    [randint(0, 256, (16,)), randn(4, 384), randint(0, 256, (8,)), randn(6, 384)],
+    [randint(0, 256, (16,)), randn(7, 384), randint(0, 256, (5,)), randn(2, 384), randint(0, 256, (9,))]
+]
 
-modality_tokens = [[
-    torch.randn(6, 192),
-    torch.randn(4, 192)
-], [
-    torch.randn(5, 192),
-    torch.randn(3, 192)
-]]
-
-modality_positions = [[
-    (2, 6),
-    (10, 4)
-], [
-    (2, 5),
-    (10, 3)
-]] # (offset, length)
-
-loss, breakdown = model(
-    text_ids,
-    modality_tokens = modality_tokens,
-    modality_positions = modality_positions
-)
-
-loss.backward()
-```
-
-Multiple modalities
-
-```python
-import torch
-from transfusion_pytorch import Transfusion
-
-model = Transfusion(
-    num_text_tokens = 256,
-    dim_latent = (384, 192),
-    transformer = dict(
-        dim = 512,
-        depth = 8
-    )
-)
-
-text_ids = torch.randint(0, 256, (2, 1024))
-
-modality_tokens = [[
-    torch.randn(6, 384),
-    torch.randn(4, 192)
-], [
-    torch.randn(5, 192),
-    torch.randn(3, 384)
-]]
-
-modality_positions = [[
-    (0, 2, 6),
-    (1, 10, 4)
-], [
-    (1, 2, 5),
-    (0, 10, 3)
-]] # (type, offset, length)
-
-loss, breakdown = model(
-    text_ids,
-    modality_tokens = modality_tokens,
-    modality_positions = modality_positions
-)
+loss = model(text_and_images)
 
 loss.backward()
 ```
