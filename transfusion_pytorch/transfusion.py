@@ -591,7 +591,7 @@ class Transfusion(Module):
 
     def forward(
         self,
-        modalities: list[list[Int['_'] | Float['_ _']]],
+        modalities: list[list[Int['_'] | Float['_ _'] | tuple[int, Float['_ _']]]],
         times: Float['b m'] | None = None,
         return_loss = True,
         return_breakdown = False
@@ -614,17 +614,31 @@ class Transfusion(Module):
             batch_text = []
 
             for modality in batch_modalities:
-                is_text = modality.dtype in (torch.long, torch.int)
+                # if non-text modality detected and not given as a tuple
+                # cast to (int, Tensor) where int is defaulted to type 0 (convenience for one modality)
 
-                length = modality.shape[0]
-                offset = 0
+                if torch.is_tensor(modality) and modality.dtype == torch.float:
+                    modality = (0, modality)
+
+                is_text = not isinstance(modality, tuple)
 
                 if is_text:
-                    batch_text.append(modality)
+                    modality_tensor = modality
+                else:
+                    modality_type, modality_tensor = modality
+
+                    assert 0 <= modality_type < self.num_modalities, f'received a modality index that is out of range. only {self.num_modalities} modalities specified'
+                    assert self.dim_latents[modality_type] == modality_tensor.shape[-1], 'mismatch for modality latent dimension - expected {self.dim_latents[modality_type]} but received {modality_tensor.shape[-1]}'
+
+                offset = 0
+                length = modality_tensor.shape[0]
+
+                if is_text:
+                    batch_text.append(modality_tensor)
                 else:
                     batch_text.append(torch.full((length,), -1, device = device))
-                    batch_modality_tokens.append(modality)
-                    batch_modality_positions.append((offset, length))
+                    batch_modality_tokens.append(modality_tensor)
+                    batch_modality_positions.append((modality_type, offset, length))
 
                 offset += length
 
