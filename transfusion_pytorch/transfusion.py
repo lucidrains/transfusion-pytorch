@@ -556,6 +556,7 @@ class Transfusion(Module):
 
         # modality transforms
 
+        modality_token_transform = cast_tuple(modality_token_transform)
         modality_token_transform = [default(transform, identity) for transform in modality_token_transform]
         self.modality_token_transform = [Rearrange(maybe_einops_eq) if isinstance(maybe_einops_eq, str) else maybe_einops_eq for maybe_einops_eq in modality_token_transform]
 
