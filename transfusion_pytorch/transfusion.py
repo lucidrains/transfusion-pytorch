@@ -555,6 +555,7 @@ class Transfusion(Module):
         self.dim_latents = cast_tuple(dim_latent)
 
         # modality transforms
+        modality_token_transform = default(modality_token_transform, [])
 
         modality_token_transform = [default(transform, identity) for transform in modality_token_transform]
         self.modality_token_transform = [Rearrange(maybe_einops_eq) if isinstance(maybe_einops_eq, str) else maybe_einops_eq for maybe_einops_eq in modality_token_transform]
@@ -625,8 +626,12 @@ class Transfusion(Module):
 
             for one_tokens, one_position in zip(batch_modality_tokens, batch_modality_position):
                 modality_type, _, _ = one_position
-                post_encode_transform = self.modality_token_transform[modality_type]
-                transformed = post_encode_transform(one_tokens)
+                if modality_type in self.modality_token_transform:
+                    post_encode_transform = self.modality_token_transform[modality_type]
+                    transformed = post_encode_transform(one_tokens)
+                else:
+                    transformed = one_tokens
+
                 batch_transformed.append(transformed)
 
             transformed_modality_tokens.append(batch_transformed)
