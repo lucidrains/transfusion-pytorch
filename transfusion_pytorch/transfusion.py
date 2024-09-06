@@ -558,6 +558,14 @@ class Transfusion(Module):
 
         self.num_modalities = len(self.dim_latents)
 
+        # modality start and end tokens - termed [som] [eom] in this repo
+
+        num_som_eom_tokens = self.num_modalities * 2
+        som_eom_tensor = torch.arange(num_som_eom_tokens) + num_text_tokens # shift to the very end
+        som_eom_tensor = rearrange(som_eom_tensor, '(be m) -> be m', be = 2)
+
+        self.som_ids, self.eom_ids = som_eom_tensor.tolist()
+
         # modality transforms
 
         modality_token_transform = cast_tuple(modality_token_transform, self.num_modalities)
@@ -574,9 +582,11 @@ class Transfusion(Module):
 
         # embeddings and un-embeddings
 
-        self.text_embed = nn.Embedding(num_text_tokens, dim)
+        effective_num_text_tokens = num_text_tokens + num_som_eom_tokens
 
-        self.to_text_logits = Linear(dim, num_text_tokens, bias = False)
+        self.text_embed = nn.Embedding(effective_num_text_tokens, dim)
+
+        self.to_text_logits = Linear(dim, effective_num_text_tokens, bias = False)
 
         self.model_to_latent_preds = ModuleList([Linear(dim, dim_latent, bias = False) for dim_latent in self.dim_latents])
 
@@ -636,9 +646,18 @@ class Transfusion(Module):
                 if is_text:
                     batch_text.append(modality_tensor)
                 else:
-                    batch_text.append(torch.full((length,), -1, device = device))
+
+                    text_tensor = torch.full((length,), -1, device = device) # text is all -1 here, so text labels are not learned on
+
+                    # add the [som] and [eom] tokens for the modality type
+
+                    som_id, eom_id = self.som_ids[modality_type], self.eom_ids[modality_type]
+                    text_tensor = F.pad(text_tensor, (1, 0), value = som_id)
+                    text_tensor = F.pad(text_tensor, (0, 1), value = eom_id)
+
+                    batch_text.append(text_tensor)
                     batch_modality_tokens.append(modality_tensor)
-                    batch_modality_positions.append((modality_type, offset, length))
+                    batch_modality_positions.append((modality_type, offset + 1, length)) # offset + 1 due to extra [som] token
 
                 offset += length
 
