@@ -554,15 +554,17 @@ class Transfusion(Module):
 
         self.dim_latents = cast_tuple(dim_latent)
 
-        # modality transforms
-
-        modality_token_transform = cast_tuple(modality_token_transform)
-        modality_token_transform = [default(transform, identity) for transform in modality_token_transform]
-        self.modality_token_transform = [Rearrange(maybe_einops_eq) if isinstance(maybe_einops_eq, str) else maybe_einops_eq for maybe_einops_eq in modality_token_transform]
-
         # number of modalities
 
         self.num_modalities = len(self.dim_latents)
+
+        # modality transforms
+
+        modality_token_transform = cast_tuple(modality_token_transform, self.num_modalities)
+        modality_token_transform = [default(transform, identity) for transform in modality_token_transform]
+        self.modality_token_transform = [Rearrange(maybe_einops_eq) if isinstance(maybe_einops_eq, str) else maybe_einops_eq for maybe_einops_eq in modality_token_transform]
+
+        assert len(self.modality_token_transform) == self.num_modalities
 
         self.latent_to_model_projs = ModuleList([Linear(dim_latent, dim) if dim_latent != dim else nn.Identity() for dim_latent in self.dim_latents])
 
