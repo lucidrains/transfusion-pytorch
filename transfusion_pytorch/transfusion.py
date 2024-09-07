@@ -142,7 +142,7 @@ def order_modality_positions_by_seq_offset(
     # sort by ascending offset and do a final mask of both offset and length to 0
 
     modalities = einx.get_at('b [mi] ..., b mo -> b mo ...', modalities, sorted_indices)
-    modalities = einx.where('b m, b m ..., -> b m ...', ~no_modality_mask, modalities, 0.)
+    modalities = einx.where('b m, b m ..., -> b m ...', ~no_modality_mask, modalities, 0)
 
     return modalities, sorted_indices
 
@@ -608,6 +608,7 @@ class Transfusion(Module):
         self,
         prompt: ModalitySample | None = None
     ) -> ModalitySample:
+
         was_training = self.training
         self.eval()
 
@@ -620,7 +621,7 @@ class Transfusion(Module):
         modalities: list[ModalitySample],
         times: (
             Float['b m'] |
-            Callable[[Float['b m 3']], Float['b m']] | # allows a researcher to customize the times (noise level) based on the overall modality configuration of a sample
+            Callable[[Int['b m 3']], Float['b m']] | # allows a researcher to customize the times (noise level) based on the overall modality configuration of a sample
             None
         ) = None,
         return_loss = True,
