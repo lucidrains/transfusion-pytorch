@@ -564,11 +564,19 @@ class Transfusion(Module):
 
         # modality start and end tokens - termed [som] [eom] in this repo
 
-        num_som_eom_tokens = self.num_modalities * 2
+        num_som_eom_tokens = (self.num_modalities + 1) * 2
         som_eom_tensor = torch.arange(num_som_eom_tokens) + num_text_tokens # shift to the very end
         som_eom_tensor = rearrange(som_eom_tensor, '(be m) -> be m', be = 2)
 
+        text_start_end_tensor, modality_start_end_tensor = som_eom_tensor[:, 0], som_eom_tensor[:, 1:]
+
+        # modality start and end ids
+
         self.som_ids, self.eom_ids = som_eom_tensor.tolist()
+
+        # entire "sentence" start and end id
+
+        self.sos_id, self.eos_id = text_start_end_tensor.tolist()
 
         # modality transforms
 
@@ -632,6 +640,12 @@ class Transfusion(Module):
         tuple[Float[''], LossBreakdown]
     ):
         device = self.device
+
+        # add "sentence" start and end tokens
+
+        for modality in modalities:
+            modality.insert(0, tensor([self.sos_id], device = device))
+            modality.append(tensor([self.eos_id], device = device))
 
         # process list of text and modalities interspersed with one another
 
