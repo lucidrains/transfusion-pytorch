@@ -618,7 +618,11 @@ class Transfusion(Module):
     def forward(
         self,
         modalities: list[ModalitySample],
-        times: Float['b m'] | None = None,
+        times: (
+            Float['b m'] |
+            Callable[[Float['b m 3']], Float['b m']] | # allows a researcher to customize the times (noise level) based on the overall modality configuration of a sample
+            None
+        ) = None,
         return_loss = True,
         return_breakdown = False
     ) -> (
@@ -746,7 +750,10 @@ class Transfusion(Module):
         # noise the modality tokens
 
         if not exists(times):
-            times = torch.rand((batch, num_modalities), device = device)
+            if callable(times): # todo: rename to another field (derive_times: Callable?)
+                times = times(modality_positions)
+            else:
+                times = torch.rand((batch, num_modalities), device = device)
 
         if return_loss:
             noised_modality_tokens = []
