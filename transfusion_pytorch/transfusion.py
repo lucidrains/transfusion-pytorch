@@ -21,6 +21,8 @@ import torch.nn.functional as F
 from torch.nn import Module, ModuleList, Linear
 from torch.nn.utils.rnn import pad_sequence
 
+from torchdiffeq import odeint
+
 import einx
 from einops import rearrange, repeat, reduce, einsum, pack
 from einops.layers.torch import Rearrange
@@ -39,6 +41,8 @@ except ImportError:
     flex_attention = None
 
 # constants
+
+ModalitySample = list[Int['_'] | Float['_ _'] | tuple[int, Float['_ _']]]
 
 RawModalityPositions = list[list[tuple[int, int]]]
 
@@ -599,9 +603,21 @@ class Transfusion(Module):
     def device(self):
         return next(self.parameters()).device
 
+    @torch.no_grad()
+    def sample(
+        self,
+        prompt: ModalitySample | None = None
+    ) -> ModalitySample:
+        was_training = self.training
+        self.eval()
+
+        raise NotImplementedError
+
+        self.train(was_training)
+
     def forward(
         self,
-        modalities: list[list[Int['_'] | Float['_ _'] | tuple[int, Float['_ _']]]],
+        modalities: list[ModalitySample],
         times: Float['b m'] | None = None,
         return_loss = True,
         return_breakdown = False
