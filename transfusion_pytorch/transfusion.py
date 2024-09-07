@@ -31,6 +31,8 @@ from transfusion_pytorch.tensor_typing import Float, Int, Bool
 
 from rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
 
+from tqdm import tqdm
+
 pad_sequence = partial(pad_sequence, batch_first = True)
 
 # maybe flex attention
@@ -125,6 +127,10 @@ def modality_positions_to_tensor(
 
     modalities: list[Tensor] = [tensor(modality, device = device) for modality in modalities]
     modalities = pad_sequence(modalities, padding_value = pad_value)
+
+    if modalities.ndim == 2:
+        modalities = modalities.reshape(*modalities.shape, 3)
+
     return modalities
 
 # sanitizing modalities tensor, making sure it is ordered
@@ -242,6 +248,17 @@ def naive_attn_mask(
     )
 
     return is_causal | is_modality.any(dim = 1)
+
+# sampling related functions
+
+# min_p for text
+# https://arxiv.org/abs/2407.01082
+
+def min_p_filter(logits, min_p = 0.1):
+    probs = logits.softmax(dim = -1)
+    max_probs = probs.amax(dim = -1, keepdim = True)
+    limit = min_p * max_probs
+    return torch.where(probs < limit, float('-inf'), logits)
 
 # random fourier embedding
 
@@ -614,15 +631,32 @@ class Transfusion(Module):
     @torch.no_grad()
     def sample(
         self,
-        prompt: ModalitySample | None = None
+        prompt: ModalitySample | None = None,
+        max_length = 8192,
+        text_temperature = 1.5,
+        text_min_p = 0.1,
     ) -> ModalitySample:
 
         was_training = self.training
         self.eval()
 
-        raise NotImplementedError
+        seq = tensor([self.sos_id], device = self.device)
+
+        for _ in tqdm(range(max_length)):
+            logits = self.forward([[seq]], return_loss = False)
+            logits = logits[0][-1]
+
+            logits = min_p_filter(logits, min_p = text_min_p)
+            probs = (logits / text_temperature).softmax(dim = -1)
+
+            sampled = torch.multinomial(probs, 1)
+            seq = torch.cat((seq, sampled), dim = -1)
+
+            if sampled.item() == self.eos_id:
+                break
 
         self.train(was_training)
+        return [seq]
 
     def forward(
         self,
@@ -641,11 +675,12 @@ class Transfusion(Module):
     ):
         device = self.device
 
-        # add "sentence" start and end tokens
+        # add "sentence" start and end tokens when training
 
-        for modality in modalities:
-            modality.insert(0, tensor([self.sos_id], device = device))
-            modality.append(tensor([self.eos_id], device = device))
+        if return_loss:
+            for modality in modalities:
+                modality.insert(0, tensor([self.sos_id], device = device))
+                modality.append(tensor([self.eos_id], device = device))
 
         # process list of text and modalities interspersed with one another
 
@@ -719,6 +754,11 @@ class Transfusion(Module):
         if modality_positions.shape[-1] == 2: # Int['b m 2'] -> Int['b m 3'] if type is not given (one modality)
             modality_positions = F.pad(modality_positions, (1, 0), value = 0)
 
+        # for now use dummy padding modality position info if empty (all zeros)
+
+        if modality_positions.numel() == 0:
+            modality_positions = F.pad(modality_positions, (0, 0, 0, 1))
+
         # embed the list of modality tokens into a sequence of Float['b n d'] at right offsets and lengths as dictated by modalities info tensor
 
         if torch.is_tensor(modality_tokens):
@@ -770,11 +810,11 @@ class Transfusion(Module):
             else:
                 times = torch.rand((batch, num_modalities), device = device)
 
+        times = einsum(is_modalities.float(), times, 'b t m n, b m -> b t n')
+
         if return_loss:
             noised_modality_tokens = []
             flows = []
-
-            times = einsum(is_modalities.float(), times, 'b t m n, b m -> b t n')
 
             for modality_id, one_modality_tokens in enumerate(modality_tokens):
                 noise = torch.randn_like(one_modality_tokens)

@@ -1,6 +1,6 @@
 [project]
 name = "transfusion-pytorch"
-version = "0.0.22"
+version = "0.0.23"
 description = "Transfusion in Pytorch"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }
@@ -30,6 +30,7 @@ dependencies = [
     'rotary_embedding_torch',
     'torchdiffeq',
     'torch>=2.0',
+    'tqdm'
 ]
 
 [project.urls]

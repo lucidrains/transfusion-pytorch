@@ -83,3 +83,14 @@ loss.backward()
     url     = {https://medium.com/@ohadrubin/exploring-weight-decay-in-layer-normalization-challenges-and-a-reparameterization-solution-ad4d12c24950}
 }
 ```
+
+```bibtex
+@article{Nguyen2024MinPS,
+    title   = {Min P Sampling: Balancing Creativity and Coherence at High Temperature},
+    author  = {Minh Nguyen and Andrew Baker and Andreas Kirsch and Clement Neo},
+    journal = {ArXiv},
+    year    = {2024},
+    volume  = {abs/2407.01082},
+    url     = {https://api.semanticscholar.org/CorpusID:270870613}
+}
+```
