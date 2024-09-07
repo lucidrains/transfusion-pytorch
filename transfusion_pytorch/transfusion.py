@@ -659,7 +659,7 @@ class Transfusion(Module):
                     batch_modality_tokens.append(modality_tensor)
                     batch_modality_positions.append((modality_type, offset + 1, length)) # offset + 1 due to extra [som] token
 
-                offset += length
+                offset += length + 2 # +2 due to [som] and [eom]
 
             text.append(torch.cat(batch_text))
             modality_tokens.append(batch_modality_tokens)
