@@ -21,8 +21,6 @@ import torch.nn.functional as F
 from torch.nn import Module, ModuleList, Linear
 from torch.nn.utils.rnn import pad_sequence
 
-from torchdiffeq import odeint
-
 import einx
 from einops import rearrange, repeat, reduce, einsum, pack
 from einops.layers.torch import Rearrange
@@ -259,6 +257,9 @@ def min_p_filter(logits, min_p = 0.1):
     max_probs = probs.amax(dim = -1, keepdim = True)
     limit = min_p * max_probs
     return torch.where(probs < limit, float('-inf'), logits)
+
+
+from torchdiffeq import odeint
 
 # random fourier embedding
 
@@ -555,6 +556,11 @@ class Transfusion(Module):
         modality_token_transform: tuple[str | callable, ...] | None = None,
         ignore_index = -1,
         diffusion_loss_weight = 1.,
+        odeint_kwargs: dict = dict(
+            atol = 1e-5,
+            rtol = 1e-5,
+            method = 'midpoint'
+        ),
     ):
         super().__init__()
 
@@ -623,6 +629,10 @@ class Transfusion(Module):
 
         self.ignore_index = ignore_index
         self.diffusion_loss_weight = diffusion_loss_weight
+
+        # diffusion sampling related
+
+        self.odeint_fn = partial(odeint, **odeint_kwargs)
 
     @property
     def device(self):
