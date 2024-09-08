@@ -71,6 +71,15 @@ def divisible_by(num, den):
 def cast_tuple(t, length = 1):
     return t if isinstance(t, tuple) else ((t,) * length)
 
+def eval_decorator(fn):
+    def inner(self, *args, **kwargs):
+        was_training = self.training
+        self.eval()
+        out = fn(self, *args, **kwargs)
+        self.train(was_training)
+        return out
+    return inner
+
 # tensor helpers
 
 def l2norm(t):
@@ -593,7 +602,7 @@ class Transfusion(Module):
 
         # modality start and end ids
 
-        self.som_ids, self.eom_ids = som_eom_tensor.tolist()
+        self.som_ids, self.eom_ids = modality_start_end_tensor.tolist()
 
         # entire "sentence" start and end id
 
@@ -637,34 +646,93 @@ class Transfusion(Module):
         return next(self.parameters()).device
 
     @torch.no_grad()
+    @eval_decorator
     def sample(
         self,
         prompt: ModalitySample | None = None,
         max_length = 8192,
         text_temperature = 1.5,
         text_min_p = 0.1,
+        modality_length = 32, # fix the modality token length for now, but this will be determined by the language model in a metadata tag
+        modality_steps = 16
     ) -> ModalitySample:
 
-        was_training = self.training
-        self.eval()
+        device = self.device
 
-        seq = tensor([self.sos_id], device = self.device)
+        init_text_seq = tensor([self.sos_id], device = self.device)
+        modality_sample = [init_text_seq]
 
-        for _ in tqdm(range(max_length)):
-            logits = self.forward([[seq]], return_loss = False)
-            logits = logits[0][-1]
+        curr_length = 0
+        curr_modality_id = None
+        is_decoding_text = True  # starts off with text decoding, and alternates with modalities depending on [som] tokens detected
 
-            logits = min_p_filter(logits, min_p = text_min_p)
-            probs = (logits / text_temperature).softmax(dim = -1)
+        with tqdm(total = max_length) as pbar:
 
-            sampled = torch.multinomial(probs, 1)
-            seq = torch.cat((seq, sampled), dim = -1)
+            while curr_length <= max_length:
 
-            if sampled.item() == self.eos_id:
-                break
+                if is_decoding_text:
+                    *_, seq = modality_sample
 
-        self.train(was_training)
-        return [seq]
+                    logits = self.forward([modality_sample], return_loss = False)
+                    logits = logits[0][-1]
+
+                    logits = min_p_filter(logits, min_p = text_min_p)
+                    probs = (logits / text_temperature).softmax(dim = -1)
+
+                    sampled = torch.multinomial(probs, 1)
+
+                    seq = torch.cat((seq, sampled), dim = -1)
+                    modality_sample[-1] = seq
+
+                    pbar.update(1)
+                    curr_length += 1
+
+                    sampled_token_id = sampled.item()
+
+                    if sampled_token_id == self.eos_id:
+                        break
+
+                    if sampled_token_id in self.som_ids:
+                        curr_modality_id = self.som_ids.index(sampled_token_id)
+                        is_decoding_text = False
+
+                else:
+                    assert exists(curr_modality_id)
+
+                    latent_dim = self.dim_latents[curr_modality_id]
+                    noise = torch.randn((modality_length, latent_dim), device = device)
+
+                    def ode_step_fn(t, denoised):
+                        embeds = self.forward([[*modality_sample, denoised]], return_loss = False, return_embed = True)
+
+                        to_flow_pred = self.model_to_latent_preds[curr_modality_id]
+                        flow = to_flow_pred(embeds)
+
+                        return flow[0, -modality_length:]
+
+                    times = torch.linspace(0, 1, modality_steps, device = device)
+
+                    trajectory = self.odeint_fn(ode_step_fn, noise, times)
+
+                    # add the sampled modality tokens
+
+                    sampled_modality = trajectory[-1]
+                    modality_sample.append((curr_modality_id, sampled_modality))
+
+                    # add the appropriate [eom]
+
+                    eom_id = self.eom_ids[curr_modality_id]
+                    modality_sample.append(tensor([eom_id], device = device))
+
+                    # back to decoding text
+
+                    pbar.update(modality_length)
+                    curr_length += modality_length
+
+                    curr_modality_id = None
+                    is_decoding_text = True
+
+        return modality_sample
 
     def forward(
         self,
@@ -675,12 +743,16 @@ class Transfusion(Module):
             None
         ) = None,
         return_loss = True,
-        return_breakdown = False
+        return_breakdown = False,
+        return_embed = False
     ) -> (
         Float['b n l'] |
+        Float['b n d'] |
         Float[''] |
         tuple[Float[''], LossBreakdown]
     ):
+        return_loss &= not return_embed
+
         device = self.device
 
         # add "sentence" start and end tokens when training
@@ -717,7 +789,7 @@ class Transfusion(Module):
                     modality_type, modality_tensor = modality
 
                     assert 0 <= modality_type < self.num_modalities, f'received a modality index that is out of range. only {self.num_modalities} modalities specified'
-                    assert self.dim_latents[modality_type] == modality_tensor.shape[-1], 'mismatch for modality latent dimension - expected {self.dim_latents[modality_type]} but received {modality_tensor.shape[-1]}'
+                    assert self.dim_latents[modality_type] == modality_tensor.shape[-1], f'mismatch for modality latent dimension - expected {self.dim_latents[modality_type]} but received {modality_tensor.shape[-1]}'
 
                 length = modality_tensor.shape[0]
 
@@ -873,6 +945,11 @@ class Transfusion(Module):
             rotary_emb = rotary_emb,
             modality_positions = modality_positions
         )
+
+        # early return for embedding for decoding modality
+
+        if return_embed:
+            return embed
 
         # text unembedding
 
