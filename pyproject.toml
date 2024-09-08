@@ -1,6 +1,6 @@
 [project]
 name = "transfusion-pytorch"
-version = "0.0.26"
+version = "0.0.27"
 description = "Transfusion in Pytorch"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }

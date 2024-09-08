@@ -664,6 +664,7 @@ class Transfusion(Module):
 
         curr_length = 0
         curr_modality_id = None
+        num_past_modalities = 0  # starts off with no modalities in output
         is_decoding_text = True  # starts off with text decoding, and alternates with modalities depending on [som] tokens detected
 
         with tqdm(total = max_length) as pbar:
@@ -702,8 +703,15 @@ class Transfusion(Module):
                     latent_dim = self.dim_latents[curr_modality_id]
                     noise = torch.randn((modality_length, latent_dim), device = device)
 
-                    def ode_step_fn(t, denoised):
-                        embeds = self.forward([[*modality_sample, denoised]], return_loss = False, return_embed = True)
+                    def ode_step_fn(step_times, denoised):
+                        step_times = rearrange(step_times, ' -> 1 1') # batch size of 1
+                        step_times = F.pad(step_times, (num_past_modalities, 0), value = 1.) # past decoded modalities receive a time conditioning of 1.
+
+                        embeds = self.forward(
+                            [[*modality_sample, denoised]],
+                            times = step_times,
+                            return_embed = True,
+                        )
 
                         to_flow_pred = self.model_to_latent_preds[curr_modality_id]
                         flow = to_flow_pred(embeds)
@@ -729,6 +737,7 @@ class Transfusion(Module):
                     pbar.update(modality_length)
                     curr_length += modality_length
 
+                    num_past_modalities += 1
                     curr_modality_id = None
                     is_decoding_text = True
 
