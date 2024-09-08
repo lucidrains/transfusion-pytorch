@@ -25,13 +25,26 @@ import einx
 from einops import rearrange, repeat, reduce, einsum, pack
 from einops.layers.torch import Rearrange
 
-from transfusion_pytorch.tensor_typing import Float, Int, Bool
-
 from rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
 
 from tqdm import tqdm
 
 pad_sequence = partial(pad_sequence, batch_first = True)
+
+# tensor typing
+
+import jaxtyping
+
+class TorchTyping:
+    def __init__(self, abstract_dtype):
+        self.abstract_dtype = abstract_dtype
+
+    def __getitem__(self, shapes: str):
+        return self.abstract_dtype[Tensor, shapes]
+
+Float = TorchTyping(jaxtyping.Float)
+Int   = TorchTyping(jaxtyping.Int)
+Bool  = TorchTyping(jaxtyping.Bool)
 
 # maybe flex attention
 
