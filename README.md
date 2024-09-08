@@ -37,6 +37,10 @@ text_and_images = [
 loss = model(text_and_images)
 
 loss.backward()
+
+# after much training
+
+one_multimodal_sample = model.sample()
 ```
 
 Multiple different modalities
@@ -64,6 +68,10 @@ text_images_and_audio = [
 loss = model(text_images_and_audio)
 
 loss.backward()
+
+# after much training
+
+one_multimodal_sample = model.sample()
 ```
 
 ## Citations
