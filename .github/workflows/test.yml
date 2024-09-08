@@ -7,13 +7,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Python
-        uses: actions/setup-python@v4
-      - name: Install the latest version of rye
-        uses: eifinger/setup-rye@v2
-      - name: Use UV instead of pip
-        run: rye config --set-bool behavior.use-uv=true
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
       - name: Install dependencies
         run: |
-          rye sync
-      - name: Run pytest
-        run: rye run pytest --cov=. tests/
+          python -m pip install uv
+          python -m uv pip install --upgrade pip
+          python -m uv pip install torch==2.3.1
+          python -m uv pip install -e .[test]
+      - name: Test with pytest
+        run: |
+          python -m pytest tests/
