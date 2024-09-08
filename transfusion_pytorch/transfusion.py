@@ -420,12 +420,18 @@ class Attention(Module):
         attn_mask: Tensor | None = None,
         rotary_emb: Tensor | None = None,
         block_mask = None,
+        return_kv_cache = False
     ):
         assert not (exists(block_mask) and exists(attn_mask))
 
         x = self.norm(x)
 
         q, k, v = self.to_qkv(x)
+
+        # maybe kv cache
+
+        if return_kv_cache:
+            kv_cache = torch.stack((k, v))
 
         # rotary embeddings
 
@@ -461,7 +467,12 @@ class Attention(Module):
 
         # combine heads and out
 
-        return self.to_out(out)
+        out = self.to_out(out)
+
+        if not return_kv_cache:
+            return out
+
+        return out, kv_cache
 
 class Transformer(Module):
     def __init__(
@@ -672,6 +683,8 @@ class Transfusion(Module):
             while curr_length <= max_length:
 
                 if is_decoding_text:
+                    pbar.set_description('decoding text')
+
                     *_, seq = modality_sample
 
                     logits = self.forward([modality_sample], return_loss = False)
@@ -699,6 +712,7 @@ class Transfusion(Module):
 
                 else:
                     assert exists(curr_modality_id)
+                    pbar.set_description(f'decoding modality [{curr_modality_id}]')
 
                     latent_dim = self.dim_latents[curr_modality_id]
                     noise = torch.randn((modality_length, latent_dim), device = device)
@@ -708,7 +722,7 @@ class Transfusion(Module):
                         step_times = F.pad(step_times, (num_past_modalities, 0), value = 1.) # past decoded modalities receive a time conditioning of 1.
 
                         embeds = self.forward(
-                            [[*modality_sample, denoised]],
+                            [[*modality_sample, (curr_modality_id, denoised)]],
                             times = step_times,
                             return_embed = True,
                         )
@@ -719,7 +733,6 @@ class Transfusion(Module):
                         return flow[0, -modality_length:]
 
                     times = torch.linspace(0, 1, modality_steps, device = device)
-
                     trajectory = self.odeint_fn(ode_step_fn, noise, times)
 
                     # add the sampled modality tokens
