@@ -143,11 +143,9 @@ def order_modality_positions_by_seq_offset(
     offsets_to_sort = offsets.masked_fill(no_modality_mask, 1e10)
     _, sorted_indices = offsets_to_sort.sort(dim = -1)
 
-    # sort by ascending offset and do a final mask of both offset and length to 0
+    # sort by ascending offset
 
     modalities = einx.get_at('b [mi] ..., b mo -> b mo ...', modalities, sorted_indices)
-    modalities = einx.where('b m, b m ..., -> b m ...', ~no_modality_mask, modalities, 0)
-
     return modalities, sorted_indices
 
 # deriving relative positions from modality positions
@@ -702,6 +700,7 @@ class Transfusion(Module):
             batch_modality_positions = []
             batch_modality_tokens = []
             batch_text = []
+            offset = 0
 
             for modality in batch_modalities:
                 # if non-text modality detected and not given as a tuple
@@ -720,24 +719,28 @@ class Transfusion(Module):
                     assert 0 <= modality_type < self.num_modalities, f'received a modality index that is out of range. only {self.num_modalities} modalities specified'
                     assert self.dim_latents[modality_type] == modality_tensor.shape[-1], 'mismatch for modality latent dimension - expected {self.dim_latents[modality_type]} but received {modality_tensor.shape[-1]}'
 
-                offset = 0
                 length = modality_tensor.shape[0]
+
+                # handle text
 
                 if is_text:
                     batch_text.append(modality_tensor)
-                else:
+                    offset += length
+                    continue
 
-                    text_tensor = torch.full((length,), -1, device = device) # text is all -1 here, so text labels are not learned on
+                # otherwise handle a modality
 
-                    # add the [som] and [eom] tokens for the modality type
+                text_tensor = torch.full((length,), -1, device = device) # text is all -1 here, so text labels are not learned on
 
-                    som_id, eom_id = self.som_ids[modality_type], self.eom_ids[modality_type]
-                    text_tensor = F.pad(text_tensor, (1, 0), value = som_id)
-                    text_tensor = F.pad(text_tensor, (0, 1), value = eom_id)
+                # add the [som] and [eom] tokens for the modality type
 
-                    batch_text.append(text_tensor)
-                    batch_modality_tokens.append(modality_tensor)
-                    batch_modality_positions.append((modality_type, offset + 1, length)) # offset + 1 due to extra [som] token
+                som_id, eom_id = self.som_ids[modality_type], self.eom_ids[modality_type]
+                text_tensor = F.pad(text_tensor, (1, 0), value = som_id)
+                text_tensor = F.pad(text_tensor, (0, 1), value = eom_id)
+
+                batch_text.append(text_tensor)
+                batch_modality_tokens.append(modality_tensor)
+                batch_modality_positions.append((modality_type, offset + 1, length)) # offset + 1 due to extra [som] token
 
                 offset += length + 2 # +2 due to [som] and [eom]
 
