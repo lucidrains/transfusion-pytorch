@@ -58,6 +58,8 @@ except ImportError:
 
 ModalitySample = list[Int['_'] | Float['_ _'] | tuple[int, Float['_ _']]]
 
+ModalityTokenTransform = str | Callable | None
+
 RawModalityPositions = list[list[tuple[int, int]]]
 
 class LossBreakdown(NamedTuple):
@@ -639,7 +641,7 @@ class Transfusion(Module):
         num_text_tokens,
         transformer: dict | Transformer,
         dim_latent: int | tuple[int, ...] | None = None,
-        modality_token_transform: tuple[str | Callable, ...] | None = None,
+        modality_token_transform: tuple[ModalityTokenTransform, ...] | ModalityTokenTransform = None,
         ignore_index = -1,
         diffusion_loss_weight = 1.,
         odeint_kwargs: dict = dict(
@@ -862,13 +864,15 @@ class Transfusion(Module):
         return_loss = True,
         return_breakdown = False,
         return_embed = False,
-        return_kv_cache = False
+        return_kv_cache = False,
     ) -> (
         Float['b n l'] |
         Float['b n d'] |
         Float[''] |
         tuple[Float[''], LossBreakdown]
     ):
+        is_decoding = exists(decoding_text_or_modality)
+
         return_loss &= not return_embed
 
         device = self.device
@@ -905,6 +909,10 @@ class Transfusion(Module):
                     modality_tensor = modality
                 else:
                     modality_type, modality_tensor = modality
+
+                    if not is_decoding:
+                        modality_transform = self.modality_token_transform[modality_type]
+                        modality_tensor = modality_transform(modality_tensor)
 
                     assert 0 <= modality_type < self.num_modalities, f'received a modality index that is out of range. only {self.num_modalities} modalities specified'
                     assert self.dim_latents[modality_type] == modality_tensor.shape[-1], f'mismatch for modality latent dimension - expected {self.dim_latents[modality_type]} but received {modality_tensor.shape[-1]}'
@@ -970,23 +978,6 @@ class Transfusion(Module):
 
         if torch.is_tensor(modality_tokens):
             modality_tokens = [modality_tokens]
-
-        # transform the modality tokens from the vae encoder output into (batch, seq, feature) shape, if needed
-
-        transformed_modality_tokens = []
-
-        for batch_modality_tokens, batch_modality_position in zip(modality_tokens, modality_positions):
-            batch_transformed = []
-
-            for one_tokens, one_position in zip(batch_modality_tokens, batch_modality_position):
-                modality_type, _, _ = one_position
-                post_encode_transform = self.modality_token_transform[modality_type]
-                transformed = post_encode_transform(one_tokens)
-                batch_transformed.append(transformed)
-
-            transformed_modality_tokens.append(batch_transformed)
-
-        modality_tokens = transformed_modality_tokens
 
         # embed the modality tokens into one Tensor if not given as one
 
