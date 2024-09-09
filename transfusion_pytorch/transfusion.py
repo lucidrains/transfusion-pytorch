@@ -759,6 +759,7 @@ class Transfusion(Module):
         text_min_p = 0.1,
         cache_kv = False,
         modality_length = 32, # fix the modality token length for now, but this will be determined by the language model in a metadata tag
+        init_modality_noise: Float['n d'] | None = None,
         modality_steps = 16
     ) -> ModalitySample:
 
@@ -770,6 +771,8 @@ class Transfusion(Module):
         curr_length = 0
         curr_modality_id = None
         num_past_modalities = 0  # starts off with no modalities in output
+
+        text_is_greedy = text_temperature == 0.
         is_decoding_text = True  # starts off with text decoding, and alternates with modalities depending on [som] tokens detected
 
         cache = None
@@ -793,10 +796,13 @@ class Transfusion(Module):
 
                     logits = logits[0][-1]
 
-                    logits = min_p_filter(logits, min_p = text_min_p)
-                    probs = (logits / text_temperature).softmax(dim = -1)
+                    if text_is_greedy:
+                        sampled = logits.argmax(dim = -1, keepdim = True)
+                    else:
+                        logits = min_p_filter(logits, min_p = text_min_p)
 
-                    sampled = torch.multinomial(probs, 1)
+                        probs = (logits / text_temperature).softmax(dim = -1)
+                        sampled = torch.multinomial(probs, 1)
 
                     seq = torch.cat((seq, sampled), dim = -1)
                     modality_sample[-1] = seq
@@ -821,7 +827,13 @@ class Transfusion(Module):
                     pbar.set_description(f'decoding modality [{curr_modality_id}]')
 
                     latent_dim = self.dim_latents[curr_modality_id]
-                    noise = torch.randn((modality_length, latent_dim), device = device)
+
+                    if exists(init_modality_noise):
+                        noise = init_modality_noise[:modality_length, :latent_dim]
+                    else:
+                        noise = torch.randn((modality_length, latent_dim), device = device)
+
+                    assert noise.shape == (modality_length, latent_dim)
 
                     new_kv_cache = None
 
