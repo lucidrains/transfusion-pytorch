@@ -13,7 +13,7 @@ i, j - sequence (row, col)
 """
 
 from functools import partial
-from typing import NamedTuple
+from typing import NamedTuple, Callable
 
 import torch
 from torch import nn, Tensor, tensor
@@ -27,6 +27,7 @@ from einops.layers.torch import Rearrange
 
 from rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
 
+from beartype import beartype
 from tqdm import tqdm
 
 pad_sequence = partial(pad_sequence, batch_first = True)
@@ -303,6 +304,7 @@ class RandomFourierEmbed(Module):
 # from DiT paper and sota for time conditioning for now
 
 class AdaptiveWrapper(Module):
+    @beartype
     def __init__(
         self,
         fn: Module,
@@ -488,6 +490,7 @@ class Attention(Module):
         return out, kv_cache
 
 class Transformer(Module):
+    @beartype
     def __init__(
         self,
         dim,
@@ -578,13 +581,14 @@ class Transformer(Module):
 # classes
 
 class Transfusion(Module):
+    @beartype
     def __init__(
         self,
         *,
         num_text_tokens,
         transformer: dict | Transformer,
         dim_latent: int | tuple[int, ...] | None = None,
-        modality_token_transform: tuple[str | callable, ...] | None = None,
+        modality_token_transform: tuple[str | Callable, ...] | None = None,
         ignore_index = -1,
         diffusion_loss_weight = 1.,
         odeint_kwargs: dict = dict(
