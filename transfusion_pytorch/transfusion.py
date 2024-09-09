@@ -826,6 +826,10 @@ class Transfusion(Module):
                     assert 0 <= modality_type < self.num_modalities, f'received a modality index that is out of range. only {self.num_modalities} modalities specified'
                     assert self.dim_latents[modality_type] == modality_tensor.shape[-1], f'mismatch for modality latent dimension - expected {self.dim_latents[modality_type]} but received {modality_tensor.shape[-1]}'
 
+                # auto move modality tensor to device of model
+
+                modality_tensor = modality_tensor.to(device)
+
                 length = modality_tensor.shape[0]
 
                 # handle text
