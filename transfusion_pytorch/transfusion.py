@@ -279,7 +279,6 @@ def min_p_filter(logits, min_p = 0.1):
     limit = min_p * max_probs
     return torch.where(probs < limit, float('-inf'), logits)
 
-
 from torchdiffeq import odeint
 
 # random fourier embedding
@@ -359,12 +358,24 @@ class AdaptiveWrapper(Module):
 
         out = self.fn(x, **kwargs)
 
+        multiple_returns = isinstance(out, tuple)
+
+        if multiple_returns:
+            out, *rest = out
+
         # take care of conditioning output separately for text vs modality
 
         text_out = out * (self.layerscale + 1.)
         modalities_out = out * self.to_ada_ln_zero(cond).sigmoid()
 
-        return torch.where(is_any_modality, modalities_out, text_out)
+        conditioned_out = torch.where(is_any_modality, modalities_out, text_out)
+
+        # take care of function returning cache
+
+        if not multiple_returns:
+            return conditioned_out
+
+        return (conditioned_out, *rest)
 
 # attention
 
@@ -538,9 +549,10 @@ class Transformer(Module):
         attn_mask: Bool['b i j'] | None = None,
         modality_positions: RawModalityPositions | Int['b n 2'] | None = None,
         is_any_modality: Bool['b n'] | None = None,
-        rotary_emb: Tensor | None = None
+        rotary_emb: Tensor | None = None,
+        return_kv_cache = False
     ):
-        seq_len, device = x.shape[-2], x.device
+        batch, seq_len, device = x.shape[0], x.shape[-2], x.device
         assert exists(attn_mask) ^ exists(modality_positions)
 
         # handle time
@@ -572,11 +584,22 @@ class Transformer(Module):
 
         # transformer layers as usual, using mask from above
 
+        new_cache = []
+
         for attn, ff in self.layers:
-            x = attn(x, rotary_emb = rotary_emb, **attn_mask_kwargs, **adaptive_kwargs) + x
+            attn_out, kv_cache = attn(x, rotary_emb = rotary_emb, return_kv_cache = True, **attn_mask_kwargs, **adaptive_kwargs)
+
+            new_cache.append(kv_cache)
+
+            x = attn_out + x
             x = ff(x, **adaptive_kwargs) + x
 
-        return self.norm(x)
+        out = self.norm(x)
+
+        if not return_kv_cache:
+            return out
+
+        return out, torch.stack(new_cache)
 
 # classes
 
