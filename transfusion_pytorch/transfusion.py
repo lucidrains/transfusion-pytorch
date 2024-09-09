@@ -903,6 +903,7 @@ class Transfusion(Module):
     ) -> (
         Float['b n l'] |
         Float['b n d'] |
+        tuple[Float['b n _'], list[Float['...']]] |
         Float[''] |
         tuple[Float[''], LossBreakdown]
     ):
