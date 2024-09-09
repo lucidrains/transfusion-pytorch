@@ -1,12 +1,22 @@
 import pytest
 from functools import partial
 from torch import randint, randn
-from transfusion_pytorch import Transfusion
+
+from transfusion_pytorch.transfusion import (
+    Transfusion,
+    flex_attention,
+    exists
+)
 
 @pytest.mark.parametrize('cache_kv', (False, True))
+@pytest.mark.parametrize('use_flex_attn', (False, True))
 def test_transfusion(
-    cache_kv: bool
+    cache_kv: bool,
+    use_flex_attn: bool
 ):
+
+    if not exists(flex_attention):
+        return pytest.skip()
 
     text_tokens = 8
     randint_ = partial(randint, 0, text_tokens)
@@ -16,7 +26,8 @@ def test_transfusion(
         dim_latent = (384, 192), # specify multiple latent dimensions
         transformer = dict(
             dim = 512,
-            depth = 2
+            depth = 2,
+            use_flex_attn = use_flex_attn
         )
     )
 
@@ -36,7 +47,13 @@ def test_transfusion(
     one_multimodal_sample = model.sample(max_length = 128, cache_kv = cache_kv)
 
 
-def test_auto_modality_transform():
+@pytest.mark.parametrize('use_flex_attn', (False, True))
+def test_auto_modality_transform(
+    use_flex_attn: bool
+):
+
+    if not exists(flex_attention):
+        return pytest.skip()
 
     text_tokens = 8
     randint_ = partial(randint, 0, text_tokens)
@@ -47,7 +64,8 @@ def test_auto_modality_transform():
         modality_token_transform = 'c h w -> (h w) c',
         transformer = dict(
             dim = 512,
-            depth = 2
+            depth = 2,
+            use_flex_attn = use_flex_attn
         )
     )
 
