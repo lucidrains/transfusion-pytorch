@@ -445,6 +445,7 @@ class Attention(Module):
         x,
         attn_mask: Tensor | None = None,
         rotary_emb: Tensor | None = None,
+        cache: Tensor | None = None,
         block_mask = None,
         return_kv_cache = False
     ):
@@ -453,6 +454,13 @@ class Attention(Module):
         x = self.norm(x)
 
         q, k, v = self.to_qkv(x)
+
+        # handle cache being passed in
+
+        if exists(cache):
+            cached_k, cached_v = cache
+            k = torch.cat((cached_k, k), dim = -2)
+            v = torch.cat((cached_v, v), dim = -2)
 
         # maybe kv cache
 
@@ -550,6 +558,7 @@ class Transformer(Module):
         modality_positions: RawModalityPositions | Int['b n 2'] | None = None,
         is_any_modality: Bool['b n'] | None = None,
         rotary_emb: Tensor | None = None,
+        cache: Tensor | None = None,
         return_kv_cache = False
     ):
         batch, seq_len, device = x.shape[0], x.shape[-2], x.device
@@ -582,12 +591,25 @@ class Transformer(Module):
 
         adaptive_kwargs = dict(cond = cond, is_any_modality = is_any_modality)
 
+        # handle cache
+
+        cache = default(cache, (None,))
+        iter_cache = iter(cache)
+
         # transformer layers as usual, using mask from above
 
         new_cache = []
 
         for attn, ff in self.layers:
-            attn_out, kv_cache = attn(x, rotary_emb = rotary_emb, return_kv_cache = True, **attn_mask_kwargs, **adaptive_kwargs)
+
+            attn_out, kv_cache = attn(
+                x,
+                rotary_emb = rotary_emb,
+                cache = next(iter_cache, None),
+                return_kv_cache = True,
+                **attn_mask_kwargs,
+                **adaptive_kwargs
+            )
 
             new_cache.append(kv_cache)
 
