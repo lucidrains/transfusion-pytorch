@@ -766,7 +766,7 @@ class Transfusion(Module):
         device = self.device
 
         init_text_seq = tensor([self.sos_id], device = self.device)
-        modality_sample = [init_text_seq]
+        modality_sample = [init_text_seq, *default(prompt, [])]
 
         curr_length = 0
         curr_modality_id = None
