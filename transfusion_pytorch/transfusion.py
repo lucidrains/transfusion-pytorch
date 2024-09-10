@@ -102,8 +102,33 @@ def char_tokenize(
     text: str,
     device = None,
     offset = 0
-):
+) -> Tensor:
     return tensor([*bytes(text, 'UTF-8')], device = device) + offset
+
+def decode_chars(
+    t: Tensor,
+    offset = 0,
+) -> str:
+    byte_list = (t - offset).clamp(min = 0).tolist()
+    return bytes(byte_list).decode('UTF-8')
+
+def get_tokens_since_rightmost_id(
+    t: Tensor,
+    rightmost_id: int
+) -> Tensor:
+    """
+    ex. [9] [2] [8] [4] [7]
+    2 would return [8] [4] [7]
+    """
+
+    mask = t == rightmost_id
+
+    if not mask.any():
+        return t[0:0] # return empty tensor if no id found
+
+    reverse_cumsum = mask.flip(dims = (0,)).cumsum(dim = 0).flip(dims = (0,))
+    after_right_mask = reverse_cumsum == 0
+    return t[after_right_mask]
 
 # tensor helpers
 
@@ -731,7 +756,10 @@ class Transfusion(Module):
 
         # char tokenizing for modality meta information
 
-        self.char_tokenizer = partial(char_tokenize, offset = num_text_tokens + num_text_special_ids + num_modality_special_ids)
+        meta_token_offset = num_text_tokens + num_text_special_ids + num_modality_special_ids
+
+        self.char_tokenizer = partial(char_tokenize, offset = meta_token_offset)
+        self.decode_chars = partial(decode_chars, offset = meta_token_offset)
 
         num_meta_tokens = 256
 
@@ -843,6 +871,20 @@ class Transfusion(Module):
 
                     if sampled_token_id in self.som_ids:
                         curr_modality_id = self.som_ids.index(sampled_token_id)
+
+                        # get the modality meta id
+
+                        mom_id = self.mom_ids[curr_modality_id]
+
+                        # get the tokens after the modality meta id
+
+                        maybe_meta_tensor = get_tokens_since_rightmost_id(seq, mom_id)
+
+                        if maybe_meta_tensor.numel() > 0:
+                            meta_tensor = maybe_meta_tensor[:-1]
+                            meta_str = self.decode_chars(meta_tensor)
+                            # todo - handle setting the modality length after getting the meta data
+
                         is_decoding_text = False
 
                 else:
