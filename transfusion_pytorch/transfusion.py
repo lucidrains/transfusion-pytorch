@@ -665,6 +665,7 @@ class Transfusion(Module):
         transformer: dict | Transformer,
         dim_latent: int | tuple[int, ...] | None = None,
         modality_token_transform: tuple[ModalityTokenTransform, ...] | ModalityTokenTransform = None,
+        modality_default_length: int | tuple[int, ...] | None = None,
         ignore_index = -1,
         diffusion_loss_weight = 1.,
         odeint_kwargs: dict = dict(
@@ -696,21 +697,28 @@ class Transfusion(Module):
 
         self.num_modalities = len(self.dim_latents)
 
-        # modality start and end tokens - termed [som] [eom] in this repo
+        # default token lengths for respective modality
+        # fallback if the language model does not come up with valid dimensions
 
-        num_som_eom_tokens = (self.num_modalities + 1) * 2
-        som_eom_tensor = torch.arange(num_som_eom_tokens) + num_text_tokens # shift to the very end
-        som_eom_tensor = rearrange(som_eom_tensor, '(be m) -> be m', be = 2)
+        self.modality_default_length = cast_tuple(modality_default_length)
 
-        text_start_end_tensor, modality_start_end_tensor = som_eom_tensor[:, 0], som_eom_tensor[:, 1:]
-
-        # modality start and end ids
-
-        self.som_ids, self.eom_ids = modality_start_end_tensor.tolist()
+        assert len(self.modality_default_length) == self.num_modalities
 
         # entire "sentence" start and end id
 
-        self.sos_id, self.eos_id = text_start_end_tensor.tolist()
+        num_text_special_ids = 2
+
+        self.sos_id, self.eos_id = num_text_tokens, (num_text_tokens + 1)
+
+        # modality meta, start and end tokens - termed [mom] [som] [eom] in this repo
+
+        num_modality_special_ids = self.num_modalities * 3
+        som_eom_tensor = torch.arange(num_modality_special_ids) + num_text_tokens + num_text_special_ids # shift to the very end
+        som_eom_tensor = rearrange(som_eom_tensor, '(id_types m) -> id_types m', id_types = 3)
+
+        # modality start and end ids
+
+        self.mom_ids, self.som_ids, self.eom_ids = som_eom_tensor.tolist()
 
         # modality transforms
 
@@ -728,7 +736,7 @@ class Transfusion(Module):
 
         # embeddings and un-embeddings
 
-        effective_num_text_tokens = num_text_tokens + num_som_eom_tokens
+        effective_num_text_tokens = num_text_tokens + num_text_special_ids + num_modality_special_ids
 
         self.text_embed = nn.Embedding(effective_num_text_tokens, dim)
 
@@ -912,13 +920,14 @@ class Transfusion(Module):
         return_loss &= not return_embed
 
         device = self.device
+        tensor_ = partial(tensor, device = device)
 
         # add "sentence" start and end tokens when training
 
         if return_loss:
             for modality in modalities:
-                modality.insert(0, tensor([self.sos_id], device = device))
-                modality.append(tensor([self.eos_id], device = device))
+                modality.insert(0, tensor_([self.sos_id]))
+                modality.append(tensor_([self.eos_id]))
 
         # process list of text and modalities interspersed with one another
 
@@ -972,9 +981,15 @@ class Transfusion(Module):
 
                 # add the [som] and [eom] tokens for the modality type
 
-                som_id, eom_id = self.som_ids[modality_type], self.eom_ids[modality_type]
-                text_tensor = F.pad(text_tensor, (1, 0), value = som_id)
-                text_tensor = F.pad(text_tensor, (0, 1), value = eom_id)
+                mom_id, som_id, eom_id = self.mom_ids[modality_type], self.som_ids[modality_type], self.eom_ids[modality_type]
+
+                text_tensor = torch.cat((
+                    tensor_([mom_id]),
+                    # todo - add modality meta information here and parse out during sampling
+                    tensor_([som_id]),
+                    text_tensor,
+                    tensor_([eom_id])
+                ))
 
                 batch_text.append(text_tensor)
                 batch_modality_tokens.append(modality_tensor)
