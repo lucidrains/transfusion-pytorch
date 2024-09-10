@@ -96,6 +96,15 @@ def eval_decorator(fn):
         return out
     return inner
 
+# character based tokenizer
+
+def char_tokenize(
+    text: str,
+    device = None,
+    offset = 0
+):
+    return tensor([*bytes(text, 'UTF-8')], device = device) + offset
+
 # tensor helpers
 
 def l2norm(t):
@@ -716,9 +725,15 @@ class Transfusion(Module):
         som_eom_tensor = torch.arange(num_modality_special_ids) + num_text_tokens + num_text_special_ids # shift to the very end
         som_eom_tensor = rearrange(som_eom_tensor, '(id_types m) -> id_types m', id_types = 3)
 
-        # modality start and end ids
+        # modality meta, start and end ids
 
         self.mom_ids, self.som_ids, self.eom_ids = som_eom_tensor.tolist()
+
+        # char tokenizing for modality meta information
+
+        self.char_tokenizer = partial(char_tokenize, offset = num_text_tokens + num_text_special_ids + num_modality_special_ids)
+
+        num_meta_tokens = 256
 
         # modality transforms
 
@@ -736,7 +751,7 @@ class Transfusion(Module):
 
         # embeddings and un-embeddings
 
-        effective_num_text_tokens = num_text_tokens + num_text_special_ids + num_modality_special_ids
+        effective_num_text_tokens = num_text_tokens + num_text_special_ids + num_modality_special_ids + num_meta_tokens
 
         self.text_embed = nn.Embedding(effective_num_text_tokens, dim)
 
@@ -983,9 +998,13 @@ class Transfusion(Module):
 
                 mom_id, som_id, eom_id = self.mom_ids[modality_type], self.som_ids[modality_type], self.eom_ids[modality_type]
 
+                # start by just storing the token length of the modality
+
+                modality_meta_info = self.char_tokenizer(str(length), device = device)
+
                 text_tensor = torch.cat((
                     tensor_([mom_id]),
-                    # todo - add modality meta information here and parse out during sampling
+                    modality_meta_info,
                     tensor_([som_id]),
                     text_tensor,
                     tensor_([eom_id])
