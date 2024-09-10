@@ -746,22 +746,24 @@ class Transfusion(Module):
 
         # modality meta, start and end tokens - termed [mom] [som] [eom] in this repo
 
-        num_modality_special_ids = self.num_modalities * 3
+        num_modality_special_ids = self.num_modalities * 2
         som_eom_tensor = torch.arange(num_modality_special_ids) + num_text_tokens + num_text_special_ids # shift to the very end
-        som_eom_tensor = rearrange(som_eom_tensor, '(id_types m) -> id_types m', id_types = 3)
+        som_eom_tensor = rearrange(som_eom_tensor, '(start_end m) -> start_end m', start_end = 2)
 
         # modality meta, start and end ids
 
-        self.mom_ids, self.som_ids, self.eom_ids = som_eom_tensor.tolist()
+        self.som_ids, self.eom_ids = som_eom_tensor.tolist()
 
         # char tokenizing for modality meta information
 
         meta_token_offset = num_text_tokens + num_text_special_ids + num_modality_special_ids
 
-        self.char_tokenizer = partial(char_tokenize, offset = meta_token_offset)
-        self.decode_chars = partial(decode_chars, offset = meta_token_offset)
+        self.meta_id = meta_token_offset
 
-        num_meta_tokens = 256
+        self.char_tokenizer = partial(char_tokenize, offset = meta_token_offset + 1)
+        self.decode_chars = partial(decode_chars, offset = meta_token_offset + 1)
+
+        num_meta_tokens = 256 + 1
 
         # modality transforms
 
@@ -872,13 +874,9 @@ class Transfusion(Module):
                     if sampled_token_id in self.som_ids:
                         curr_modality_id = self.som_ids.index(sampled_token_id)
 
-                        # get the modality meta id
-
-                        mom_id = self.mom_ids[curr_modality_id]
-
                         # get the tokens after the modality meta id
 
-                        maybe_meta_tensor = get_tokens_since_rightmost_id(seq, mom_id)
+                        maybe_meta_tensor = get_tokens_since_rightmost_id(seq, self.meta_id)
 
                         if maybe_meta_tensor.numel() > 0:
                             meta_tensor = maybe_meta_tensor[:-1]
@@ -1038,14 +1036,14 @@ class Transfusion(Module):
 
                 # add the [som] and [eom] tokens for the modality type
 
-                mom_id, som_id, eom_id = self.mom_ids[modality_type], self.som_ids[modality_type], self.eom_ids[modality_type]
+                som_id, eom_id = self.som_ids[modality_type], self.eom_ids[modality_type]
 
                 # start by just storing the token length of the modality
 
                 modality_meta_info = self.char_tokenizer(str(length), device = device)
 
                 text_tensor = torch.cat((
-                    tensor_([mom_id]),
+                    tensor_([self.meta_id]),
                     modality_meta_info,
                     tensor_([som_id]),
                     text_tensor,
