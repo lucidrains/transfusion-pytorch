@@ -700,7 +700,7 @@ class Transfusion(Module):
         # default token lengths for respective modality
         # fallback if the language model does not come up with valid dimensions
 
-        self.modality_default_length = cast_tuple(modality_default_length)
+        self.modality_default_length = cast_tuple(modality_default_length, self.num_modalities)
 
         assert len(self.modality_default_length) == self.num_modalities
 
