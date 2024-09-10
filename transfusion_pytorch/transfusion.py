@@ -103,14 +103,14 @@ def char_tokenize(
     device = None,
     offset = 0
 ) -> Tensor:
-    return tensor([*bytes(text, 'UTF-8')], device = device) + offset
+    return tensor([*map(ord, text)], device = device) + offset
 
 def decode_chars(
     t: Tensor,
     offset = 0,
 ) -> str:
     byte_list = (t - offset).clamp(min = 0, max = 127).tolist()
-    return bytes(byte_list).decode('UTF-8')
+    return ''.join([*map(chr, byte_list)])
 
 def get_tokens_since_rightmost_id(
     t: Tensor,
