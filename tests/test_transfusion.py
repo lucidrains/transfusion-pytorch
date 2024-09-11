@@ -86,4 +86,4 @@ def test_auto_modality_transform(
 
     prime = [tensor(model.som_ids[0])]
 
-    one_multimodal_sample = model.sample(prime)
+    one_multimodal_sample = model.sample(prime, max_length = 128)
