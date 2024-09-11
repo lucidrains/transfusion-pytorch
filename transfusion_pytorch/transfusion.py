@@ -380,26 +380,36 @@ class AdaptiveWrapper(Module):
     def forward(
         self,
         x: Float['b n {self.dim}'],
-        cond: Float['b {self.dim_cond}'] | Float['b n {self.dim_cond}'],
-        is_any_modality: bool | Bool['b n'],
+        cond: Float['b {self.dim_cond}'] | Float['b n {self.dim_cond}'] | None = None,
+        is_any_modality: bool | Bool['b n'] | None = None,
         **kwargs
     ):
-        if isinstance(is_any_modality, bool):
-            is_any_modality = torch.full((x.shape[:-1]), is_any_modality, device = x.device, dtype = torch.bool)
+        assert not (exists(cond) ^ exists(is_any_modality))
 
-        is_any_modality = rearrange(is_any_modality, '... -> ... 1')
+        has_modality = exists(is_any_modality)
 
-        if cond.ndim == 2:
+        if has_modality:
+            if isinstance(is_any_modality, bool):
+                is_any_modality = torch.full((x.shape[:-1]), is_any_modality, device = x.device, dtype = torch.bool)
+
+            is_any_modality = rearrange(is_any_modality, '... -> ... 1')
+
+        if exists(cond) and cond.ndim == 2:
             cond = rearrange(cond, 'b d -> b 1 d')
 
         x = self.layernorm(x)
 
-        gamma, beta = self.to_film(cond).chunk(2, dim = -1)
+        if has_modality:
+            gamma, beta = self.to_film(cond).chunk(2, dim = -1)
 
         text_tokens = x * (self.layernorm_gamma + 1.)
-        modality_tokens = x * (gamma + 1.) + beta
 
-        x = torch.where(is_any_modality, modality_tokens, text_tokens)
+        if has_modality:
+            modality_tokens = x * (gamma + 1.) + beta
+
+            x = torch.where(is_any_modality, modality_tokens, text_tokens)
+        else:
+            x = text_tokens
 
         # attention or feedforwards
 
@@ -413,9 +423,13 @@ class AdaptiveWrapper(Module):
         # take care of conditioning output separately for text vs modality
 
         text_out = out * (self.layerscale + 1.)
-        modalities_out = out * self.to_ada_ln_zero(cond).sigmoid()
 
-        conditioned_out = torch.where(is_any_modality, modalities_out, text_out)
+        if has_modality:
+            modalities_out = out * self.to_ada_ln_zero(cond).sigmoid()
+
+            conditioned_out = torch.where(is_any_modality, modalities_out, text_out)
+        else:
+            conditioned_out = text_out
 
         # take care of function returning cache
 
@@ -493,9 +507,12 @@ class Attention(Module):
         attn_mask: Tensor | None = None,
         rotary_emb: Tensor | None = None,
         cache: Tensor | None = None,
+        causal = False,
         block_mask = None,
         return_kv_cache = False
     ):
+        device = x.device
+
         assert not (exists(block_mask) and exists(attn_mask))
 
         x = self.norm(x)
@@ -522,6 +539,7 @@ class Attention(Module):
         # whether to use flex attention or not
 
         if self.use_flex_attn:
+            assert not causal, 'causal mask should be constructed in transformer'
 
             flex_attn_kwargs = dict(block_mask = block_mask)
 
@@ -536,8 +554,14 @@ class Attention(Module):
 
             sim = softclamp(sim, self.softcap_value)
 
+            mask_value = -torch.finfo(sim.dtype).max
+
+            if causal:
+                i, j = sim.shape[-2:]
+                causal_mask = torch.ones((i, j), dtype = torch.bool, device = device).triu(j - i + 1)
+                sim = sim.masked_fill(causal_mask, mask_value)
+
             if exists(attn_mask):
-                mask_value = -torch.finfo(sim.dtype).max
                 sim = einx.where('b i j, b h i j, -> b h i j', attn_mask, sim, mask_value)
 
             attn = sim.softmax(dim = -1)
@@ -604,12 +628,13 @@ class Transformer(Module):
     def forward(
         self,
         x,
-        times: Float[''] | Float['b'] | Float['b n'],
+        times: Float[''] | Float['b'] | Float['b n'] | None = None,
         attn_mask: Bool['b i j'] | None = None,
         modality_positions: RawModalityPositions | Int['b n 2'] | None = None,
         is_any_modality: bool | Bool['b n'] | None = None,
         rotary_emb: Tensor | None = None,
         cache: Tensor | None = None,
+        causal_mask: bool = False,
         return_kv_cache = False
     ):
         batch, seq_len, device = x.shape[0], x.shape[-2], x.device
@@ -617,16 +642,28 @@ class Transformer(Module):
 
         # handle time
 
-        if times.ndim == 0:
-            times = repeat(times, ' -> b', b = batch)
+        cond = None
 
-        cond = self.to_time_cond(times)
+        if exists(times):
+            if times.ndim == 0:
+                times = repeat(times, ' -> b', b = batch)
+
+            cond = self.to_time_cond(times)
 
         # create the specialized mask needed for autoregressive text + bidirectional diffusion attention
 
         attn_mask_kwargs = dict()
 
+        if causal_mask:
+            if self.use_flex_attn:
+                block_mask = create_block_mask(causal, B = None, H = None, Q_LEN = seq_len, KV_LEN = seq_len, device = device)
+                attn_mask_kwargs.update(block_mask = block_mask)
+            else:
+                attn_mask_kwargs.update(causal = True)
+
         if exists(modality_positions):
+            assert not causal_mask
+
             if self.use_flex_attn:
                 transfusion_mask_fn = transfusion_attn_mask(modality_positions)
                 block_mask = create_block_mask(transfusion_mask_fn, B = None, H = None, Q_LEN = seq_len, KV_LEN = seq_len, device = device)
@@ -635,8 +672,7 @@ class Transformer(Module):
                 attn_mask = naive_attn_mask(seq_len, modality_positions, device = device)
                 attn_mask_kwargs.update(attn_mask = attn_mask)
 
-        if not exists(is_any_modality):
-            assert exists(modality_positions)
+        if not exists(is_any_modality) and exists(modality_positions):
             is_any_modality = modality_positions_to_is_modality_mask(seq_len, modality_positions).any(dim = 1)
             is_any_modality = reduce(is_any_modality, 'b t n -> b n', 'any')
 
@@ -996,9 +1032,54 @@ class Transfusion(Module):
 
         return modality_sample
 
+    def forward_text(
+        self,
+        text: Int['b n']
+    ) -> Float['']:
+
+        device = self.device
+        text = text.to(device)
+
+        text, labels = text[:, :-1], text[:, 1:]
+
+        # embed text
+
+        text = text.masked_fill(text == -1, 0)
+        tokens = self.text_embed(text)
+
+        # rotary
+
+        seq_len = tokens.shape[-2]
+        pos = torch.arange(seq_len, device = device)
+
+        rotary_emb = self.rotary_emb(pos)
+
+        # attention
+
+        embed = self.transformer(
+            tokens,
+            rotary_emb = rotary_emb,
+            causal_mask = True
+        )
+
+        # text unembedding
+
+        logits = self.to_text_logits(embed)
+
+        loss = F.cross_entropy(
+            rearrange(logits, 'b n l -> b l n'),
+            labels,
+            ignore_index = self.ignore_index
+        )
+
+        return loss
+
     def forward(
         self,
-        modalities: list[ModalitySample],
+        modalities: (
+            list[ModalitySample] |
+            Int['b n']
+        ),
         times: (
             Float['b m'] |
             Callable[[Int['b m 3']], Float['b m']] | # allows a researcher to customize the times (noise level) based on the overall modality configuration of a sample
@@ -1018,8 +1099,13 @@ class Transfusion(Module):
         tuple[Float[''], LossBreakdown]
     ):
         is_decoding = exists(decoding_text_or_modality)
+        is_text_only = torch.is_tensor(modalities) and modalities.dtype in (torch.int, torch.long)
 
-        return_loss &= not return_embed
+        return_loss &= (not return_embed or not is_decoding)
+
+        if is_text_only:
+            assert return_loss
+            return self.forward_text(modalities)
 
         device = self.device
         tensor_ = partial(tensor, device = device)

@@ -62,7 +62,7 @@ def test_auto_modality_transform(
     randint_ = partial(randint, 0, text_tokens)
 
     model = Transfusion(
-        num_text_tokens = 256,
+        num_text_tokens = text_tokens,
         dim_latent = 384,
         modality_token_transform = 'c h w -> (h w) c',
         modality_default_length = 32,
@@ -87,3 +87,29 @@ def test_auto_modality_transform(
     prime = [tensor(model.som_ids[0])]
 
     one_multimodal_sample = model.sample(prime, max_length = 128)
+
+@pytest.mark.parametrize('use_flex_attn', (False, True))
+def test_auto_modality_transform(
+    use_flex_attn: bool
+):
+
+    if use_flex_attn and not exists(flex_attention):
+        return pytest.skip()
+
+    model = Transfusion(
+        num_text_tokens = 256,
+        dim_latent = 384,
+        modality_token_transform = 'c h w -> (h w) c',
+        modality_default_length = 32,
+        transformer = dict(
+            dim = 512,
+            depth = 2,
+            use_flex_attn = use_flex_attn
+        )
+    )
+
+    text = randint(0, 256, (2, 1024))
+
+    loss = model(text)
+
+    loss.backward()
