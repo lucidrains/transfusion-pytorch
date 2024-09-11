@@ -13,17 +13,19 @@ i, j - sequence (row, col)
 """
 
 from functools import partial
-from typing import NamedTuple, Callable
+from typing import NamedTuple, Callable, Literal
 
 import torch
 from torch import nn, Tensor, tensor
 import torch.nn.functional as F
 from torch.nn import Module, ModuleList, Linear
 from torch.nn.utils.rnn import pad_sequence
+from torch.utils._pytree import tree_map
 
 import einx
 from einops import rearrange, repeat, reduce, einsum, pack
 from einops.layers.torch import Rearrange
+
 
 from rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
 
@@ -81,11 +83,17 @@ def identity(t):
 def first(it):
     return it[0]
 
+def prepend(arr, el):
+    arr.insert(0, el)
+
 def divisible_by(num, den):
     return (num % den) == 0
 
 def cast_tuple(t, length = 1):
     return t if isinstance(t, tuple) else ((t,) * length)
+
+def tree_map_tensor(sample, fn: Callable):
+    return tree_map(lambda t: t if not torch.is_tensor(t) else fn(t), sample)
 
 def eval_decorator(fn):
     def inner(self, *args, **kwargs):
@@ -807,26 +815,74 @@ class Transfusion(Module):
     def sample(
         self,
         prompt: ModalitySample | None = None,
-        max_length = 8192,
+        max_length = 2048,
         text_temperature = 1.5,
         text_min_p = 0.1,
         cache_kv = False,
-        modality_length = 32, # fix the modality token length for now, but this will be determined by the language model in a metadata tag
+        fixed_modality_length: int | None = None,
         init_modality_noise: Float['n d'] | None = None,
         modality_steps = 16
     ) -> ModalitySample:
 
         device = self.device
 
-        init_text_seq = tensor([self.sos_id], device = self.device)
+        init_text_seq = tensor([self.sos_id], device = device)
         modality_sample = [init_text_seq, *default(prompt, [])]
+
+        # take care of moving to device
+
+        modality_sample = tree_map_tensor(modality_sample, lambda t: t.to(device))
+        modality_sample = tree_map_tensor(modality_sample, lambda t: rearrange(t, '-> 1') if t.ndim == 0 else t)
+
+        *_, last_modality_sample = modality_sample
+        assert last_modality_sample.dtype in (torch.int, torch.long), 'prompt must be text tokens'
 
         curr_length = 0
         curr_modality_id = None
+        modality_length = None
         num_past_modalities = 0  # starts off with no modalities in output
 
         text_is_greedy = text_temperature == 0.
         is_decoding_text = True  # starts off with text decoding, and alternates with modalities depending on [som] tokens detected
+
+        def maybe_transition_to_modality_decoding(seq):
+            nonlocal modality_length
+            nonlocal is_decoding_text
+            nonlocal curr_modality_id
+
+            sampled_token_id = seq[-1]
+
+            if sampled_token_id not in self.som_ids:
+                return
+
+            curr_modality_id = self.som_ids.index(sampled_token_id)
+
+            if exists(fixed_modality_length):
+                modality_length = fixed_modality_length
+                return
+
+            # get the tokens after the modality meta id
+
+            maybe_meta_tensor = get_tokens_since_rightmost_id(seq, self.meta_id)
+            default_length = self.modality_default_length[curr_modality_id]
+
+            if maybe_meta_tensor.numel() > 0:
+                meta_tensor = maybe_meta_tensor[:-1]
+                meta_str = self.decode_chars(meta_tensor)
+
+                if not meta_str.isdigit() or int(meta_str) <= 0:
+
+                    assert exists(default_length), f'invalid modality meta information detected, please set `modality_default_length` in order to properly fallback'
+                    modality_length = default_length
+                else:
+                    modality_length = int(meta_str)
+
+            modality_length = default(modality_length, default_length)
+            is_decoding_text = False
+
+        # determine if to transition from start
+
+        maybe_transition_to_modality_decoding(last_modality_sample)
 
         cache = None
 
@@ -871,25 +927,7 @@ class Transfusion(Module):
                     if sampled_token_id == self.eos_id:
                         break
 
-                    if sampled_token_id in self.som_ids:
-                        curr_modality_id = self.som_ids.index(sampled_token_id)
-
-                        default_length = self.modality_default_length[curr_modality_id]
-
-                        # get the tokens after the modality meta id
-
-                        maybe_meta_tensor = get_tokens_since_rightmost_id(seq, self.meta_id)
-
-                        if maybe_meta_tensor.numel() > 0:
-                            meta_tensor = maybe_meta_tensor[:-1]
-                            meta_str = self.decode_chars(meta_tensor)
-
-                            if not meta_str.isdigit() or int(meta_str) <= 0:
-                                modality_length = default_length
-                            else:
-                                modality_length = int(meta_str)
-
-                        is_decoding_text = False
+                    maybe_transition_to_modality_decoding(seq)
 
                 else:
                     assert exists(curr_modality_id)
@@ -900,6 +938,7 @@ class Transfusion(Module):
                     if exists(init_modality_noise):
                         noise = init_modality_noise[:modality_length, :latent_dim]
                     else:
+                        assert exists(modality_length)
                         noise = torch.randn((modality_length, latent_dim), device = device)
 
                     assert noise.shape == (modality_length, latent_dim)
@@ -951,6 +990,8 @@ class Transfusion(Module):
 
                     num_past_modalities += 1
                     curr_modality_id = None
+                    modality_length = None
+
                     is_decoding_text = True
 
         return modality_sample
@@ -987,7 +1028,7 @@ class Transfusion(Module):
 
         if return_loss:
             for modality in modalities:
-                modality.insert(0, tensor_([self.sos_id]))
+                prepend(modality, tensor_([self.sos_id]))
                 modality.append(tensor_([self.eos_id]))
 
         # process list of text and modalities interspersed with one another
@@ -1026,6 +1067,9 @@ class Transfusion(Module):
                 # auto move modality tensor to device of model
 
                 modality_tensor = modality_tensor.to(device)
+
+                if modality_tensor.ndim == 0:
+                    modality_tensor = rearrange(modality_tensor, '-> 1')
 
                 length = modality_tensor.shape[0]
 

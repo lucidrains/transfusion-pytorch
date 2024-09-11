@@ -1,6 +1,6 @@
 import pytest
 from functools import partial
-from torch import randint, randn
+from torch import randint, randn, tensor
 
 from transfusion_pytorch.transfusion import (
     Transfusion,
@@ -15,7 +15,7 @@ def test_transfusion(
     use_flex_attn: bool
 ):
 
-    if not exists(flex_attention):
+    if use_flex_attn and not exists(flex_attention):
         return pytest.skip()
 
     text_tokens = 8
@@ -24,6 +24,7 @@ def test_transfusion(
     model = Transfusion(
         num_text_tokens = text_tokens,
         dim_latent = (384, 192), # specify multiple latent dimensions
+        modality_default_length = (32, 64),
         transformer = dict(
             dim = 512,
             depth = 2,
@@ -44,7 +45,9 @@ def test_transfusion(
 
     # after much training
 
-    one_multimodal_sample = model.sample(max_length = 128, cache_kv = cache_kv)
+    prime = [tensor(model.som_ids[0])]
+
+    one_multimodal_sample = model.sample(prime, max_length = 128, cache_kv = cache_kv)
 
 
 @pytest.mark.parametrize('use_flex_attn', (False, True))
@@ -52,7 +55,7 @@ def test_auto_modality_transform(
     use_flex_attn: bool
 ):
 
-    if not exists(flex_attention):
+    if use_flex_attn and not exists(flex_attention):
         return pytest.skip()
 
     text_tokens = 8
@@ -62,6 +65,7 @@ def test_auto_modality_transform(
         num_text_tokens = 256,
         dim_latent = 384,
         modality_token_transform = 'c h w -> (h w) c',
+        modality_default_length = 32,
         transformer = dict(
             dim = 512,
             depth = 2,
@@ -80,4 +84,6 @@ def test_auto_modality_transform(
 
     # after much training
 
-    one_multimodal_sample = model.sample()
+    prime = [tensor(model.som_ids[0])]
+
+    one_multimodal_sample = model.sample(prime)
