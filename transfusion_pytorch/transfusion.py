@@ -874,6 +874,8 @@ class Transfusion(Module):
                     if sampled_token_id in self.som_ids:
                         curr_modality_id = self.som_ids.index(sampled_token_id)
 
+                        default_length = self.modality_default_length[curr_modality_id]
+
                         # get the tokens after the modality meta id
 
                         maybe_meta_tensor = get_tokens_since_rightmost_id(seq, self.meta_id)
@@ -881,7 +883,11 @@ class Transfusion(Module):
                         if maybe_meta_tensor.numel() > 0:
                             meta_tensor = maybe_meta_tensor[:-1]
                             meta_str = self.decode_chars(meta_tensor)
-                            # todo - handle setting the modality length after getting the meta data
+
+                            if not meta_str.isdigit() or int(meta_str) <= 0:
+                                modality_length = default_length
+                            else:
+                                modality_length = int(meta_str)
 
                         is_decoding_text = False
 
