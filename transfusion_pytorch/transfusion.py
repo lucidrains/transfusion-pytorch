@@ -377,6 +377,30 @@ class AdaptiveWrapper(Module):
         nn.init.zeros_(self.to_ada_ln_zero.weight)
         nn.init.constant_(self.to_ada_ln_zero.bias, ada_ln_zero_init_bias)
 
+    def forward_text(
+        self,
+        x: Float['b n {self.dim}'],
+        **kwargs
+    ):
+
+        x = self.layernorm(x)
+
+        x = x * (self.layernorm_gamma + 1.)
+
+        out = self.fn(x, **kwargs)
+
+        multiple_returns = isinstance(out, tuple)
+
+        if multiple_returns:
+            out, *rest = out
+
+        out = out * (self.layerscale + 1.)
+
+        if multiple_returns:
+            out = (out, *rest)
+
+        return out
+
     def forward(
         self,
         x: Float['b n {self.dim}'],
@@ -388,11 +412,13 @@ class AdaptiveWrapper(Module):
 
         has_modality = exists(is_any_modality)
 
-        if has_modality:
-            if isinstance(is_any_modality, bool):
-                is_any_modality = torch.full((x.shape[:-1]), is_any_modality, device = x.device, dtype = torch.bool)
+        if not has_modality:
+            return self.forward_text(x, **kwargs)
 
-            is_any_modality = rearrange(is_any_modality, '... -> ... 1')
+        if isinstance(is_any_modality, bool):
+            is_any_modality = torch.full((x.shape[:-1]), is_any_modality, device = x.device, dtype = torch.bool)
+
+        is_any_modality = rearrange(is_any_modality, '... -> ... 1')
 
         if exists(cond) and cond.ndim == 2:
             cond = rearrange(cond, 'b d -> b 1 d')
@@ -404,12 +430,9 @@ class AdaptiveWrapper(Module):
 
         text_tokens = x * (self.layernorm_gamma + 1.)
 
-        if has_modality:
-            modality_tokens = x * (gamma + 1.) + beta
+        modality_tokens = x * (gamma + 1.) + beta
 
-            x = torch.where(is_any_modality, modality_tokens, text_tokens)
-        else:
-            x = text_tokens
+        x = torch.where(is_any_modality, modality_tokens, text_tokens)
 
         # attention or feedforwards
 
@@ -424,12 +447,9 @@ class AdaptiveWrapper(Module):
 
         text_out = out * (self.layerscale + 1.)
 
-        if has_modality:
-            modalities_out = out * self.to_ada_ln_zero(cond).sigmoid()
+        modalities_out = out * self.to_ada_ln_zero(cond).sigmoid()
 
-            conditioned_out = torch.where(is_any_modality, modalities_out, text_out)
-        else:
-            conditioned_out = text_out
+        conditioned_out = torch.where(is_any_modality, modalities_out, text_out)
 
         # take care of function returning cache
 
