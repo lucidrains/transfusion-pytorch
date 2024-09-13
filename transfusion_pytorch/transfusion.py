@@ -1154,7 +1154,8 @@ class Transfusion(Module):
     def forward_modality(
         self,
         modalities: Float['b ...'],
-        modality_type: int | None = None
+        modality_type: int | None = None,
+        return_loss = True
     ) -> Float['']:
 
         if self.num_modalities > 1:
@@ -1199,6 +1200,9 @@ class Transfusion(Module):
         )
 
         pred_flow = model_to_flow_pred_fn(embed)
+
+        if not return_loss:
+            return pred_flow
 
         # flow loss
 
