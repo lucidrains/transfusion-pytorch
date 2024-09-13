@@ -30,6 +30,8 @@ model = Transfusion(
     )
 )
 
+# any torch.long is text, torch.float is modalities
+
 text_and_images = [
     [randint(0, 256, (16,)), randn(4, 384), randint(0, 256, (8,)), randn(6, 384)],
     [randint(0, 256, (16,)), randn(7, 384), randint(0, 256, (5,)), randn(2, 384), randint(0, 256, (9,))]
@@ -61,6 +63,8 @@ model = Transfusion(
 )
 
 # then for the Tensors of type float, you can pass a tuple[int, Tensor] and specify the modality index in the first position
+
+# any torch.long is text, torch.float is modalities
 
 text_images_and_audio = [
     [randint(0, 256, (16,)), (0, randn(4, 384)), randint(0, 256, (8,)), (1, randn(6, 192))],
