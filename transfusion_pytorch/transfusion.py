@@ -52,6 +52,10 @@ Bool  = TorchTyping(jaxtyping.Bool)
 
 try:
     from torch.nn.attention.flex_attention import flex_attention, create_block_mask
+
+    if torch.cuda.is_available():
+        flex_attention = torch.compile(flex_attention)
+
 except ImportError:
     flex_attention = None
 
