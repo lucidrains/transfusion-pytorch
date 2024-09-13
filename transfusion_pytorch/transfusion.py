@@ -899,7 +899,7 @@ class Transfusion(Module):
         self.ignore_index = ignore_index
         self.flow_loss_weight = flow_loss_weight
 
-        # diffusion sampling related
+        # flow sampling related
 
         self.odeint_fn = partial(odeint, **odeint_kwargs)
 
@@ -1348,7 +1348,7 @@ class Transfusion(Module):
         if return_loss:
             text, text_labels = text[:, :-1], text[:, 1:]
 
-        # derive is_modality mask for diffusion on the right tokens + diffusion loss
+        # derive is_modality mask for flow on the right tokens + flow loss
 
         batch, seq_len, device = *text.shape, text.device
 
@@ -1430,7 +1430,7 @@ class Transfusion(Module):
 
         modality_tokens = sum(modality_tokens)
 
-        # intersperse the modalities with the text for the joint transformer + diffusion system
+        # intersperse the modalities with the text for the joint transformer + flow system
 
         tokens = einx.where('b n, b n d, b n d', is_any_modality, modality_tokens, text_tokens)
 
