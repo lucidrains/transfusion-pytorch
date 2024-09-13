@@ -113,3 +113,26 @@ def test_text(
     text = randint(0, 256, (2, 1024))
 
     model(text, return_loss = return_loss)
+
+def test_modality_only():
+
+    model = Transfusion(
+        num_text_tokens = 256,
+        dim_latent = (384, 192),
+        modality_token_transform = (
+            '... c h w -> ... (h w) c',
+            '... c h w -> ... (h w) c'
+        ),
+        modality_default_length = 32,
+        transformer = dict(
+            dim = 512,
+            depth = 2,
+            use_flex_attn = False
+        )
+    )
+
+    images = randn(2, 192, 8, 8)
+
+    loss = model(images, return_loss = True, modality_type = 1)
+
+    loss.backward()

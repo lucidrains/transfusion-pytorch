@@ -67,7 +67,7 @@ RawModalityPositions = list[list[tuple[int, int]]]
 class LossBreakdown(NamedTuple):
     total: Float['']
     text: Float['']
-    diffusion: list[Float['']]
+    flow: list[Float['']]
 
 # helper functions
 
@@ -336,8 +336,11 @@ class RandomFourierEmbed(Module):
 
     def forward(
         self,
-        times: Float['b n']
+        times: Float['b n'] | Float['b']
     ) -> Float['b n {self.dim + 1}']:
+
+        if times.ndim == 1:
+            times = rearrange(times, 'b -> b 1')
 
         freqs = einx.multiply('... i, j -> ... i j', times, self.weights) * 2 * torch.pi
         fourier_embed, _ = pack((times, freqs.sin(), freqs.cos()), 'b n *')
@@ -401,13 +404,54 @@ class AdaptiveWrapper(Module):
 
         return out
 
+    def forward_modality(
+        self,
+        x: Float['b n {self.dim}'],
+        cond: Float['b {self.dim_cond}'] | Float['b n {self.dim_cond}'],
+        **kwargs
+    ):
+        x = self.layernorm(x)
+
+        gamma, beta = self.to_film(cond).chunk(2, dim = -1)
+
+        modality_tokens = x * (gamma + 1.) + beta
+
+        # attention or feedforwards
+
+        out = self.fn(x, **kwargs)
+
+        multiple_returns = isinstance(out, tuple)
+
+        if multiple_returns:
+            out, *rest = out
+
+        # take care of conditioning output separately for text vs modality
+
+        modalities_out = out * self.to_ada_ln_zero(cond).sigmoid()
+
+        # take care of function returning cache
+
+        if not multiple_returns:
+            return modalities_out
+
+        return (modalities_out, *rest)
+
+        return modalities_out
+
     def forward(
         self,
         x: Float['b n {self.dim}'],
         cond: Float['b {self.dim_cond}'] | Float['b n {self.dim_cond}'] | None = None,
         is_any_modality: bool | Bool['b n'] | None = None,
+        modality_only = False,
         **kwargs
     ):
+        if exists(cond) and cond.ndim == 2:
+            cond = rearrange(cond, 'b d -> b 1 d')
+
+        if modality_only:
+            return self.forward_modality(x, cond = cond, **kwargs)
+
         assert not (exists(cond) ^ exists(is_any_modality))
 
         has_modality = exists(is_any_modality)
@@ -420,13 +464,9 @@ class AdaptiveWrapper(Module):
 
         is_any_modality = rearrange(is_any_modality, '... -> ... 1')
 
-        if exists(cond) and cond.ndim == 2:
-            cond = rearrange(cond, 'b d -> b 1 d')
-
         x = self.layernorm(x)
 
-        if has_modality:
-            gamma, beta = self.to_film(cond).chunk(2, dim = -1)
+        gamma, beta = self.to_film(cond).chunk(2, dim = -1)
 
         text_tokens = x * (self.layernorm_gamma + 1.)
 
@@ -654,6 +694,7 @@ class Transformer(Module):
         is_any_modality: bool | Bool['b n'] | None = None,
         rotary_emb: Tensor | None = None,
         cache: Tensor | None = None,
+        modality_only = False,
         causal_mask: bool = False,
         return_kv_cache = False
     ):
@@ -670,7 +711,7 @@ class Transformer(Module):
 
             cond = self.to_time_cond(times)
 
-        # create the specialized mask needed for autoregressive text + bidirectional diffusion attention
+        # create the specialized mask needed for autoregressive text + bidirectional flow attention
 
         attn_mask_kwargs = dict()
 
@@ -698,6 +739,7 @@ class Transformer(Module):
 
         adaptive_kwargs = dict(
             cond = cond,
+            modality_only = modality_only,
             is_any_modality = is_any_modality
         )
 
@@ -765,7 +807,7 @@ class Transfusion(Module):
         modality_token_transform: tuple[ModalityTokenTransform, ...] | ModalityTokenTransform = None,
         modality_default_length: int | tuple[int, ...] | None = None,
         ignore_index = -1,
-        diffusion_loss_weight = 1.,
+        flow_loss_weight = 1.,
         odeint_kwargs: dict = dict(
             atol = 1e-5,
             rtol = 1e-5,
@@ -856,7 +898,7 @@ class Transfusion(Module):
         # loss related
 
         self.ignore_index = ignore_index
-        self.diffusion_loss_weight = diffusion_loss_weight
+        self.flow_loss_weight = flow_loss_weight
 
         # diffusion sampling related
 
@@ -1110,17 +1152,72 @@ class Transfusion(Module):
 
         return loss
 
+    def forward_modality(
+        self,
+        modalities: Float['b ...'],
+        modality_type: int | None = None
+    ) -> Float['']:
+
+        if self.num_modalities > 1:
+            assert exists(modality_type), '`modality_type` must be explicitly passed in on forward when training on greater than 1 modality'
+
+        modality_type = default(modality_type, 0)
+
+        transform = self.modality_token_transform[modality_type]
+        latent_to_model_fn = self.latent_to_model_projs[modality_type]
+        model_to_flow_pred_fn = self.model_to_latent_preds[modality_type]
+
+        tokens = transform(modalities)
+
+        # rotary
+
+        batch, seq_len, device = tokens.shape[0], tokens.shape[-2], tokens.device
+
+        pos = torch.arange(seq_len, device = device)
+
+        rotary_emb = self.rotary_emb(pos)
+
+        # times
+
+        times = torch.rand((batch,), device = device)
+        padded_times = rearrange(times, 'b -> b 1 1')
+
+        noise = torch.randn_like(tokens)
+
+        noised_tokens = padded_times * tokens + (1. - padded_times) * noise
+
+        flow = tokens - noise
+
+        # attention
+
+        noised_tokens = latent_to_model_fn(noised_tokens)
+
+        embed = self.transformer(
+            noised_tokens,
+            times = times,
+            rotary_emb = rotary_emb,
+            modality_only = True,
+        )
+
+        pred_flow = model_to_flow_pred_fn(embed)
+
+        # flow loss
+
+        return F.mse_loss(pred_flow, flow)
+
     def forward(
         self,
         modalities: (
             list[ModalitySample] |
-            Int['b n']
+            Int['b n'] |
+            Float['b ...']
         ),
         times: (
             Float['b m'] |
             Callable[[Int['b m 3']], Float['b m']] | # allows a researcher to customize the times (noise level) based on the overall modality configuration of a sample
             None
         ) = None,
+        modality_type: int | None = None,
         cache: Tensor | None = None,
         decoding_text_or_modality: Literal['text', 'modality'] | None = None,
         return_loss = True,
@@ -1135,7 +1232,9 @@ class Transfusion(Module):
         tuple[Float[''], LossBreakdown]
     ):
         is_decoding = exists(decoding_text_or_modality)
+
         is_text_only = torch.is_tensor(modalities) and modalities.dtype in (torch.int, torch.long)
+        is_modality_only = torch.is_tensor(modalities) and modalities.dtype == torch.float
 
         return_loss &= (not return_embed or not is_decoding)
 
@@ -1149,6 +1248,10 @@ class Transfusion(Module):
             )
 
             return self.forward_text(modalities, **forward_text_kwargs)
+
+        if is_modality_only:
+            assert return_loss
+            return self.forward_modality(modalities, modality_type = modality_type)
 
         device = self.device
         tensor_ = partial(tensor, device = device)
@@ -1397,16 +1500,16 @@ class Transfusion(Module):
 
         text_loss_weight = (text_labels != self.ignore_index).sum() / total_tokens
 
-        # diffusion loss
+        # flow loss
 
         pred_flows = [fn(embed) for fn in self.model_to_latent_preds]
 
-        diffusion_losses = []
+        flow_losses = []
         modality_loss_weights = []
 
         for flow, pred_flow, is_one_modality in zip(flows, pred_flows, is_modalities.unbind(dim = 1)):
 
-            diffusion_loss = F.mse_loss(
+            flow_loss = F.mse_loss(
                 pred_flow,
                 flow,
                 reduction = 'none'
@@ -1414,22 +1517,22 @@ class Transfusion(Module):
 
             is_one_modality = reduce(is_one_modality, 'b m n -> b n', 'any')
 
-            diffusion_loss = diffusion_loss[is_one_modality].mean()
+            flow_loss = flow_loss[is_one_modality].mean()
 
             modality_loss_weight = is_one_modality.sum() / total_tokens
 
             modality_loss_weights.append(modality_loss_weight)
 
-            diffusion_losses.append(diffusion_loss)
+            flow_losses.append(flow_loss)
 
         # only the token positions that are not modalities have autoregressive loss
 
         total_loss = (
             text_loss * text_loss_weight +
-            (torch.stack(diffusion_losses) * torch.stack(modality_loss_weights)).sum() * self.diffusion_loss_weight
+            (torch.stack(flow_losses) * torch.stack(modality_loss_weights)).sum() * self.flow_loss_weight
         )
 
         if not return_breakdown:
             return total_loss
 
-        return total_loss, LossBreakdown(total_loss, text_loss, diffusion_losses)
+        return total_loss, LossBreakdown(total_loss, text_loss, flow_losses)
