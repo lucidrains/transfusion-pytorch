@@ -13,7 +13,7 @@ keywords = [
     'deep learning',
     'transformers',
     'attention mechanism',
-    'denoising diffusion',
+    'rectified flow',
   ]
 classifiers=[
     'Development Status :: 4 - Beta',
