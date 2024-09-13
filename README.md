@@ -23,6 +23,7 @@ from transfusion_pytorch import Transfusion
 model = Transfusion(
     num_text_tokens = 256,
     dim_latent = 384,
+    modality_default_length = 4,  # fallback, in the case the language model did not produce a valid modality shape
     transformer = dict(
         dim = 512,
         depth = 8
@@ -51,7 +52,8 @@ from transfusion_pytorch import Transfusion
 
 model = Transfusion(
     num_text_tokens = 256,
-    dim_latent = (384, 192), # specify multiple latent dimensions
+    dim_latent = (384, 192),            # specify multiple latent dimensions
+    modality_default_length = (4, 2),   # default lengths for first and second modality
     transformer = dict(
         dim = 512,
         depth = 8

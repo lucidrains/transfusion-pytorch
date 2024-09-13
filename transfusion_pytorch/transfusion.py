@@ -26,7 +26,6 @@ import einx
 from einops import rearrange, repeat, reduce, einsum, pack
 from einops.layers.torch import Rearrange
 
-
 from rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
 
 from beartype import beartype
