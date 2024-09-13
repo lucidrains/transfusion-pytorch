@@ -89,8 +89,10 @@ def test_auto_modality_transform(
     one_multimodal_sample = model.sample(prime, max_length = 128)
 
 @pytest.mark.parametrize('use_flex_attn', (False, True))
-def test_auto_modality_transform(
-    use_flex_attn: bool
+@pytest.mark.parametrize('return_loss', (False, True))
+def test_text(
+    use_flex_attn: bool,
+    return_loss: bool
 ):
 
     if use_flex_attn and not exists(flex_attention):
@@ -110,6 +112,4 @@ def test_auto_modality_transform(
 
     text = randint(0, 256, (2, 1024))
 
-    loss = model(text)
-
-    loss.backward()
+    model(text, return_loss = return_loss)

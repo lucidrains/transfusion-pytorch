@@ -1054,8 +1054,16 @@ class Transfusion(Module):
 
     def forward_text(
         self,
-        text: Int['b n']
-    ) -> Float['']:
+        text: Int['b n'],
+        return_loss = True,
+        return_embed = False,
+        cache: Tensor | None = None,
+        return_kv_cache = False
+    ) -> (
+        Float[''],
+        Float['b n d'],
+        tuple[Float['b n d'], list[Float['...']]]
+    ):
 
         device = self.device
         text = text.to(device)
@@ -1076,15 +1084,23 @@ class Transfusion(Module):
 
         # attention
 
-        embed = self.transformer(
+        embed, kv_cache = self.transformer(
             tokens,
             rotary_emb = rotary_emb,
-            causal_mask = True
+            causal_mask = True,
+            cache = cache,
+            return_kv_cache = True
         )
 
         # text unembedding
 
         logits = self.to_text_logits(embed)
+
+        if not return_loss:
+            if not return_kv_cache:
+                return logits
+
+            return logits, kv_cache
 
         loss = F.cross_entropy(
             rearrange(logits, 'b n l -> b l n'),
@@ -1124,8 +1140,15 @@ class Transfusion(Module):
         return_loss &= (not return_embed or not is_decoding)
 
         if is_text_only:
-            assert return_loss
-            return self.forward_text(modalities)
+
+            forward_text_kwargs = dict(
+                return_loss = return_loss,
+                return_embed = return_embed,
+                cache = cache,
+                return_kv_cache = return_kv_cache
+            )
+
+            return self.forward_text(modalities, **forward_text_kwargs)
 
         device = self.device
         tensor_ = partial(tensor, device = device)
