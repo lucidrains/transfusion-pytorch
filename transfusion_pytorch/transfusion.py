@@ -12,6 +12,7 @@ l - logits (text)
 i, j - sequence (row, col)
 """
 
+import math
 from functools import partial
 from typing import NamedTuple, Callable, Literal
 
@@ -29,6 +30,7 @@ from einops.layers.torch import Rearrange
 from rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
 
 from beartype import beartype
+from beartype.door import is_bearable
 from tqdm import tqdm
 
 pad_sequence = partial(pad_sequence, batch_first = True)
@@ -89,6 +91,9 @@ def first(it):
 def prepend(arr, el):
     arr.insert(0, el)
 
+def join(arr, delimiter = ''):
+    return delimiter.join(arr)
+
 def divisible_by(num, den):
     return (num % den) == 0
 
@@ -106,6 +111,24 @@ def eval_decorator(fn):
         self.train(was_training)
         return out
     return inner
+
+# pretty print
+
+def print_modality_sample(
+    modality_sample: ModalitySample
+):
+    output = []
+
+    for sample in modality_sample:
+        if isinstance(sample, tuple):
+            modality_type, sample = sample
+            output.append((f'modality:{modality_type}', sample.shape))
+        elif sample.dtype in (torch.int, torch.long):
+            output.append(('text', sample.shape))
+        else:
+            output.append(('modality', sample.shape))
+
+    print(output)
 
 # character based tokenizer
 
@@ -807,8 +830,11 @@ class Transfusion(Module):
         num_text_tokens,
         transformer: dict | Transformer,
         dim_latent: int | tuple[int, ...] | None = None,
-        modality_token_transform: tuple[ModalityTokenTransform, ...] | ModalityTokenTransform = None,
-        modality_default_length: int | tuple[int, ...] | None = None,
+        channel_first_latent = False,
+        modality_encoder: Module | tuple[Module, ...] | None = None,
+        modality_decoder: Module | tuple[Module, ...] | None = None,
+        modality_token_transform: tuple[ModalityTokenTransform, ...] | ModalityTokenTransform | None = None,
+        modality_default_shape: tuple[int, ...] | tuple[tuple[int, ...], ...] | None = None,
         ignore_index = -1,
         flow_loss_weight = 1.,
         odeint_kwargs: dict = dict(
@@ -836,16 +862,35 @@ class Transfusion(Module):
 
         self.dim_latents = cast_tuple(dim_latent)
 
+        # whether the latents are accepted to be channel first or channel last
+        # if channel first, will be rearrange(c ... -> ... c -> (...) c)
+
+        self.channel_first_latent = channel_first_latent
+
         # number of modalities
 
         self.num_modalities = len(self.dim_latents)
 
+        # modality encoders and decoders
+
+        modality_encoder = cast_tuple(modality_encoder, 1 if exists(modality_encoder) else self.num_modalities)
+        modality_decoder = cast_tuple(modality_decoder, 1 if exists(modality_decoder) else self.num_modalities)
+
+        self.modality_encoder = ModuleList(modality_encoder)
+        self.modality_decoder = ModuleList(modality_decoder)
+
+        assert len(self.modality_encoder) == self.num_modalities
+        assert len(self.modality_decoder) == self.num_modalities
+
         # default token lengths for respective modality
         # fallback if the language model does not come up with valid dimensions
 
-        self.modality_default_length = cast_tuple(modality_default_length, self.num_modalities)
+        if not exists(modality_default_shape) or is_bearable(modality_default_shape, tuple[int, ...]):
+            modality_default_shape = (modality_default_shape,) * self.num_modalities
 
-        assert len(self.modality_default_length) == self.num_modalities
+        self.modality_default_shape = modality_default_shape
+
+        assert len(self.modality_default_shape) == self.num_modalities
 
         # entire "sentence" start and end id
 
@@ -920,9 +965,10 @@ class Transfusion(Module):
         text_temperature = 1.5,
         text_min_p = 0.1,
         cache_kv = False,
-        fixed_modality_length: int | None = None,
+        fixed_modality_shape: tuple[int, ...] | None = None,
         init_modality_noise: Float['n d'] | None = None,
-        modality_steps = 16
+        modality_steps = 16,
+        return_unprocessed_modalities = False
     ) -> ModalitySample:
 
         device = self.device
@@ -940,14 +986,14 @@ class Transfusion(Module):
 
         curr_length = 0
         curr_modality_id = None
-        modality_length = None
+        modality_shape = None
         num_past_modalities = 0  # starts off with no modalities in output
 
         text_is_greedy = text_temperature == 0.
         is_decoding_text = True  # starts off with text decoding, and alternates with modalities depending on [som] tokens detected
 
         def maybe_transition_to_modality_decoding(seq):
-            nonlocal modality_length
+            nonlocal modality_shape
             nonlocal is_decoding_text
             nonlocal curr_modality_id
 
@@ -958,14 +1004,14 @@ class Transfusion(Module):
 
             curr_modality_id = self.som_ids.index(sampled_token_id)
 
-            if exists(fixed_modality_length):
-                modality_length = fixed_modality_length
+            if exists(fixed_modality_shape):
+                modality_shape = fixed_modality_shape
                 return
 
             # get the tokens after the modality meta id
 
             maybe_meta_tensor = get_tokens_since_rightmost_id(seq, self.meta_id)
-            default_length = self.modality_default_length[curr_modality_id]
+            default_shape = self.modality_default_shape[curr_modality_id]
 
             if maybe_meta_tensor.numel() > 0:
                 meta_tensor = maybe_meta_tensor[:-1]
@@ -973,12 +1019,14 @@ class Transfusion(Module):
 
                 if not meta_str.isdigit() or int(meta_str) <= 0:
 
-                    assert exists(default_length), f'invalid modality meta information detected, please set `modality_default_length` in order to properly fallback'
-                    modality_length = default_length
+                    assert exists(default_shape), f'invalid modality meta information detected, please set `modality_default_shape` in order to properly fallback'
+                    modality_shape = default_shape
                 else:
-                    modality_length = int(meta_str)
+                    modality_shape = int(meta_str)
 
-            modality_length = default(modality_length, default_length)
+            modality_shape = default(modality_shape, default_shape)
+            assert exists(modality_shape), f'language model did not produce a proper modality shape for modality type {curr_modality_id} - please set a fallback shape with `modality_default_shape`'
+
             is_decoding_text = False
 
         # determine if to transition from start
@@ -1035,6 +1083,9 @@ class Transfusion(Module):
                     pbar.set_description(f'decoding modality [{curr_modality_id}]')
 
                     latent_dim = self.dim_latents[curr_modality_id]
+                    maybe_modality_decoder = self.modality_decoder[curr_modality_id]
+
+                    modality_length = math.prod(modality_shape)
 
                     if exists(init_modality_noise):
                         noise = init_modality_noise[:modality_length, :latent_dim]
@@ -1072,6 +1123,11 @@ class Transfusion(Module):
                     # add the sampled modality tokens
 
                     sampled_modality = trajectory[-1]
+
+                    # reshape
+
+                    sampled_modality = sampled_modality.reshape(*modality_shape, latent_dim)
+
                     modality_sample.append((curr_modality_id, sampled_modality))
 
                     # add the appropriate [eom]
@@ -1095,7 +1151,30 @@ class Transfusion(Module):
 
                     is_decoding_text = True
 
-        return modality_sample
+        if return_unprocessed_modalities:
+            return modality_sample
+
+        # post process modalities
+
+        processed_modality_sample = []
+
+        for sample in modality_sample:
+            if not isinstance(sample, tuple):
+                processed_modality_sample.append(sample)
+                continue
+
+            modality_id, modality = sample
+            maybe_modality_decoder = self.modality_decoder[modality_id]
+
+            if self.channel_first_latent:
+                modality = rearrange(modality, '... d -> d ...')
+
+            if exists(maybe_modality_decoder):
+                modality = maybe_modality_decoder(modality)
+
+            processed_modality_sample.append((modality_id, modality))
+
+        return processed_modality_sample
 
     def forward_text(
         self,
@@ -1172,6 +1251,11 @@ class Transfusion(Module):
         model_to_flow_pred_fn = self.model_to_latent_preds[modality_type]
 
         tokens = transform(modalities)
+
+        # maybe channel first
+
+        if self.channel_first_latent:
+            tokens = rearrange(tokens, 'b d ... -> b (...) d')
 
         # rotary
 
@@ -1298,30 +1382,45 @@ class Transfusion(Module):
 
                     if not is_decoding:
                         modality_transform = self.modality_token_transform[modality_type]
+                        maybe_modality_encode = self.modality_encoder[modality_type]
+
                         modality_tensor = modality_transform(modality_tensor)
 
+                        if exists(maybe_modality_encode):
+
+                            with torch.no_grad():
+                                maybe_modality_encode.eval()
+                                modality_tensor = maybe_modality_encode(modality_tensor).detach()
+
+                        if self.channel_first_latent:
+                            modality_tensor = rearrange(modality_tensor, 'd ... -> ... d')
+
                     assert 0 <= modality_type < self.num_modalities, f'received a modality index that is out of range. only {self.num_modalities} modalities specified'
-                    assert self.dim_latents[modality_type] == modality_tensor.shape[-1], f'mismatch for modality latent dimension - expected {self.dim_latents[modality_type]} but received {modality_tensor.shape[-1]}'
+                    assert self.dim_latents[modality_type] == modality_tensor.shape[-1], f'mismatch for modality latent dimension - expected {self.dim_latents[modality_type]} but received {modality_tensor.shape[-1]} - modality shape is {tuple(modality_tensor.shape)}, perhaps you need to set `channel_first_latent = True`'
 
                 # auto move modality tensor to device of model
 
                 modality_tensor = modality_tensor.to(device)
 
-                if modality_tensor.ndim == 0:
+                if modality_tensor.dtype in (torch.int, torch.long) and modality_tensor.ndim == 0:
                     modality_tensor = rearrange(modality_tensor, '-> 1')
-
-                length = modality_tensor.shape[0]
 
                 # handle text
 
                 if is_text:
+                    assert modality_tensor.ndim == 1
+                    text_length = modality_tensor.shape[0]
+
                     batch_text.append(modality_tensor)
-                    offset += length
+                    offset += text_length
                     continue
 
                 # otherwise handle a modality
 
-                text_tensor = torch.full((length,), -1, device = device) # text is all -1 here, so text labels are not learned on
+                modality_shape_tuple = tuple(modality_tensor.shape[:-1])
+                modality_length = math.prod(modality_shape_tuple)
+
+                text_tensor = torch.full((modality_length,), -1, device = device) # text is all -1 here, so text labels are not learned on
 
                 # add the [som] and [eom] tokens for the modality type
 
@@ -1329,7 +1428,8 @@ class Transfusion(Module):
 
                 # start by just storing the token length of the modality
 
-                modality_meta_info = self.char_tokenizer(str(length), device = device)
+                modality_shape_str = join([*map(str, modality_shape_tuple)], ',')
+                modality_meta_info = self.char_tokenizer(modality_shape_str, device = device)
 
                 text_tensor = torch.cat((
                     tensor_([self.meta_id]),
@@ -1340,10 +1440,13 @@ class Transfusion(Module):
                 ))
 
                 batch_text.append(text_tensor)
-                batch_modality_tokens.append(modality_tensor)
-                batch_modality_positions.append((modality_type, offset + 1, length)) # offset + 1 due to extra [som] token
+                modality_tensor = rearrange(modality_tensor, '... d -> (...) d')
 
-                offset += length + 2 # +2 due to [som] and [eom]
+                batch_modality_tokens.append(modality_tensor)
+
+                batch_modality_positions.append((modality_type, offset + 1, modality_length)) # offset + 1 due to extra [som] token
+
+                offset += modality_length + 2 # +2 due to [som] and [eom]
 
             text.append(torch.cat(batch_text))
             modality_tokens.append(batch_modality_tokens)

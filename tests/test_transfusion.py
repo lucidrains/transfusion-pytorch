@@ -1,6 +1,7 @@
 import pytest
 from functools import partial
-from torch import randint, randn, tensor
+
+from torch import nn, randint, randn, tensor
 
 from transfusion_pytorch.transfusion import (
     Transfusion,
@@ -24,7 +25,7 @@ def test_transfusion(
     model = Transfusion(
         num_text_tokens = text_tokens,
         dim_latent = (384, 192), # specify multiple latent dimensions
-        modality_default_length = (32, 64),
+        modality_default_shape = ((32,), (64,)),
         transformer = dict(
             dim = 512,
             depth = 2,
@@ -64,8 +65,8 @@ def test_auto_modality_transform(
     model = Transfusion(
         num_text_tokens = text_tokens,
         dim_latent = 384,
-        modality_token_transform = 'c h w -> (h w) c',
-        modality_default_length = 32,
+        channel_first_latent = True,
+        modality_default_shape = (32,),
         transformer = dict(
             dim = 512,
             depth = 2,
@@ -101,8 +102,8 @@ def test_text(
     model = Transfusion(
         num_text_tokens = 256,
         dim_latent = 384,
-        modality_token_transform = 'c h w -> (h w) c',
-        modality_default_length = 32,
+        channel_first_latent = True,
+        modality_default_shape = (32,),
         transformer = dict(
             dim = 512,
             depth = 2,
@@ -119,11 +120,8 @@ def test_modality_only():
     model = Transfusion(
         num_text_tokens = 256,
         dim_latent = (384, 192),
-        modality_token_transform = (
-            '... c h w -> ... (h w) c',
-            '... c h w -> ... (h w) c'
-        ),
-        modality_default_length = 32,
+        channel_first_latent = True,
+        modality_default_shape = (32,),
         transformer = dict(
             dim = 512,
             depth = 2,
@@ -136,3 +134,45 @@ def test_modality_only():
     loss = model(images, return_loss = True, modality_type = 1)
 
     loss.backward()
+
+
+def test_text_image_end_to_end():
+    mock_vae_encoder = nn.Conv2d(3, 384, 3, padding = 1)
+    mock_vae_decoder = nn.Conv2d(384, 3, 3, padding = 1)
+
+    model = Transfusion(
+        num_text_tokens = 4,
+        dim_latent = 384,
+        channel_first_latent = True,
+        modality_default_shape = ((4, 4)),
+        modality_encoder = mock_vae_encoder,
+        modality_decoder = mock_vae_decoder,
+        transformer = dict(
+            dim = 512,
+            depth = 8
+        )
+    )
+
+    text_and_images = [
+        [
+            randint(0, 4, (16,)),
+            randn(3, 8, 8),
+            randint(0, 4, (8,)),
+            randn(3, 7, 7)
+        ],
+        [
+            randint(0, 4, (16,)),
+            randn(3, 8, 5),
+            randint(0, 4, (5,)),
+            randn(3, 2, 16),
+            randint(0, 4, (9,))
+        ]
+    ]
+
+    loss = model(text_and_images)
+
+    loss.backward()
+
+    # after much training
+
+    one_multimodal_sample = model.sample()
