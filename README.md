@@ -23,7 +23,7 @@ from transfusion_pytorch import Transfusion
 model = Transfusion(
     num_text_tokens = 256,
     dim_latent = 384,
-    modality_default_length = 4,  # fallback, in the case the language model did not produce a valid modality shape
+    modality_default_shape = (4,),  # fallback, in the case the language model did not produce a valid modality shape
     transformer = dict(
         dim = 512,
         depth = 8
@@ -54,8 +54,8 @@ from transfusion_pytorch import Transfusion
 
 model = Transfusion(
     num_text_tokens = 256,
-    dim_latent = (384, 192),            # specify multiple latent dimensions
-    modality_default_length = (4, 2),   # default lengths for first and second modality
+    dim_latent = (384, 192),                 # specify multiple latent dimensions
+    modality_default_shape = ((4,), (2,)),   # default shapes for first and second modality
     transformer = dict(
         dim = 512,
         depth = 8
@@ -78,6 +78,56 @@ loss.backward()
 # after much training
 
 one_multimodal_sample = model.sample()
+```
+
+Automatically taking care of encoding and decoding of images
+
+```python
+import torch
+from torch import nn, randint, randn
+from transfusion_pytorch import Transfusion, print_modality_sample
+
+mock_encoder = nn.Conv2d(3, 384, 3, padding = 1)
+mock_decoder = nn.Conv2d(384, 3, 3, padding = 1)
+
+model = Transfusion(
+    num_text_tokens = 12,
+    dim_latent = 384,
+    channel_first_latent = True,
+    modality_default_shape = ((4, 4)),
+    modality_encoder = mock_encoder,
+    modality_decoder = mock_decoder,
+    transformer = dict(
+        dim = 512,
+        depth = 8
+    )
+)
+
+text_and_images = [
+    [
+        randint(0, 12, (16,)),  # 16 text tokens
+        randn(3, 8, 8),         # (8 x 8) 3 channeled image
+        randint(0, 12, (8,)),   # 8 text tokens
+        randn(3, 7, 7)          # (7 x 7) 3 channeled image
+    ],
+    [
+        randint(0, 12, (16,)),  # 16 text tokens
+        randn(3, 8, 5),         # (8 x 5) 3 channeled image
+        randint(0, 12, (5,)),   # 5 text tokens
+        randn(3, 2, 16),        # (2 x 16) 3 channeled image
+        randint(0, 12, (9,))    # 9 text tokens
+    ]
+]
+
+loss = model(text_and_images)
+
+loss.backward()
+
+# after much training
+
+one_multimodal_sample = model.sample()
+
+print_modality_sample(one_multimodal_sample)
 ```
 
 ## Citations
