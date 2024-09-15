@@ -112,6 +112,11 @@ def eval_decorator(fn):
         return out
     return inner
 
+# default function for constituting modality shape from string
+
+def default_to_modality_shape_fn(maybe_shape_str) -> tuple[int, ...]:
+    return tuple([*map(int, maybe_shape_str.split(','))])
+
 # pretty print
 
 def print_modality_sample(
@@ -835,6 +840,7 @@ class Transfusion(Module):
         modality_decoder: Module | tuple[Module, ...] | None = None,
         modality_token_transform: tuple[ModalityTokenTransform, ...] | ModalityTokenTransform | None = None,
         modality_default_shape: tuple[int, ...] | tuple[tuple[int, ...], ...] | None = None,
+        to_modality_shape_fn: Callable | tuple[Callable, ...] = default_to_modality_shape_fn,
         ignore_index = -1,
         flow_loss_weight = 1.,
         odeint_kwargs: dict = dict(
@@ -870,6 +876,10 @@ class Transfusion(Module):
         # number of modalities
 
         self.num_modalities = len(self.dim_latents)
+
+        # functions for converting the sampled language model meta string back to modality shape of tuple[int, ...]
+
+        self.to_modality_shape_fn = cast_tuple(to_modality_shape_fn, self.num_modalities)
 
         # modality encoders and decoders
 
@@ -1012,6 +1022,7 @@ class Transfusion(Module):
 
             maybe_meta_tensor = get_tokens_since_rightmost_id(seq, self.meta_id)
             default_shape = self.modality_default_shape[curr_modality_id]
+            meta_str_to_modality_shape = self.to_modality_shape_fn[curr_modality_id]
 
             if maybe_meta_tensor.numel() > 0:
                 meta_tensor = maybe_meta_tensor[:-1]
@@ -1022,7 +1033,7 @@ class Transfusion(Module):
                     assert exists(default_shape), f'invalid modality meta information detected, please set `modality_default_shape` in order to properly fallback'
                     modality_shape = default_shape
                 else:
-                    modality_shape = int(meta_str)
+                    modality_shape = meta_str_to_modality_shape(meta_str)
 
             modality_shape = default(modality_shape, default_shape)
             assert exists(modality_shape), f'language model did not produce a proper modality shape for modality type {curr_modality_id} - please set a fallback shape with `modality_default_shape`'
