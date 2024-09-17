@@ -117,6 +117,24 @@ def eval_decorator(fn):
 def default_to_modality_shape_fn(maybe_shape_str) -> tuple[int, ...]:
     return tuple([*map(int, maybe_shape_str.split(','))])
 
+# default function for translating modality length to times (noise level, where 0 is highest noise)
+
+def random_modality_length_to_time_fn(modality_length: Int['b m']) -> Float['b m']:
+    return torch.rand_like(modality_length.float())
+
+def default_modality_length_to_time_fn(modality_length: Int['b m']) -> Float['b m']:
+    total_modalities, device = modality_length.shape[-1], modality_length.device
+
+    num_modalities = (modality_length > 0).sum(dim = -1).float()
+    rand_num_modalities = torch.floor(torch.rand_like(num_modalities) * num_modalities)
+    seq = torch.arange(total_modalities, device = device)
+
+    prev_decoded_modality = einx.less_equal('n, b -> b n', seq, rand_num_modalities)
+    curr_modality_rand_time = torch.rand_like(num_modalities)
+
+    # in paper, they fix previous decoded modalities to 500 / 1000 steps for discrete ddpm, here using flow matching with times 0 - 1 so corresponds to 0.5
+    return torch.where(prev_decoded_modality, 0.5, curr_modality_rand_time)
+
 # pretty print
 
 def print_modality_sample(
@@ -1314,11 +1332,8 @@ class Transfusion(Module):
             Int['b n'] |
             Float['b ...']
         ),
-        times: (
-            Float['b m'] |
-            Callable[[Int['b m 3']], Float['b m']] | # allows a researcher to customize the times (noise level) based on the overall modality configuration of a sample
-            None
-        ) = None,
+        times: Float['b m'] | None = None,
+        modality_length_to_times_fn: Callable[[Int['b m']], Float['b m']] | None = None, # allows a researcher to customize the times (noise level) based on the modality lengths in a given sample 
         modality_type: int | None = None,
         cache: Tensor | None = None,
         decoding_text_or_modality: Literal['text', 'modality'] | None = None,
@@ -1516,10 +1531,10 @@ class Transfusion(Module):
         # noise the modality tokens
 
         if not exists(times):
-            if callable(times): # todo: rename to another field (derive_times: Callable?)
-                times = times(modality_positions)
-            else:
-                times = torch.rand((batch, num_modalities), device = device)
+            modality_length_to_times_fn = default(default_modality_length_to_time_fn, modality_length_to_times_fn)
+
+            if exists(modality_length_to_times_fn):
+                times = modality_length_to_times_fn(modality_positions[..., -1])
 
         times = einsum(is_modalities.float(), times, 'b t m n, b m -> b t n')
 

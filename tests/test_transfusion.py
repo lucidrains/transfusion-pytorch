@@ -136,7 +136,10 @@ def test_modality_only():
     loss.backward()
 
 
-def test_text_image_end_to_end():
+@pytest.mark.parametrize('custom_time_fn', (False, True))
+def test_text_image_end_to_end(
+    custom_time_fn: bool
+):
     mock_vae_encoder = nn.Conv2d(3, 384, 3, padding = 1)
     mock_vae_decoder = nn.Conv2d(384, 3, 3, padding = 1)
 
@@ -169,7 +172,20 @@ def test_text_image_end_to_end():
         ]
     ]
 
-    loss = model(text_and_images)
+    # allow researchers to experiment with different time distributions across multiple modalities in a sample
+
+    def modality_length_to_times(modality_length):
+        has_modality = modality_length > 0
+        return torch.where(has_modality, torch.ones_like(modality_length), 0.)
+
+    time_fn = modality_length_to_times if custom_time_fn else None
+
+    # forward
+
+    loss = model(
+        text_and_images,
+        modality_length_to_times_fn = time_fn
+    )
 
     loss.backward()
 
