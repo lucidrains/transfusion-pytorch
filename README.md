@@ -169,3 +169,12 @@ print_modality_sample(one_multimodal_sample)
     url     = {https://api.semanticscholar.org/CorpusID:253581703}
 }
 ```
+
+```bibtex
+@inproceedings{Zhao2024MonoFormerOT,
+    title     = {MonoFormer: One Transformer for Both Diffusion and Autoregression},
+    author    = {Chuyang Zhao and Yuxing Song and Wenhao Wang and Haocheng Feng and Errui Ding and Yifan Sun and Xinyan Xiao and Jingdong Wang},
+    year      = {2024},
+    url       = {https://api.semanticscholar.org/CorpusID:272832492}
+}
+```
