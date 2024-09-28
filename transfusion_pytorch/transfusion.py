@@ -1484,7 +1484,7 @@ class Transfusion(Module):
 
                 batch_modality_positions.append((modality_type, offset + 1, modality_length)) # offset + 1 due to extra [som] token
 
-                offset += modality_length + 2 + len(modality_meta_info) # +2 due to [som] and [eom] - then account for modality shape information (or eventually any meta information about modality)
+                offset += modality_length + 2 + len(modality_meta_info) + 1 # +2 due to [som] and [eom] - then account for meta start id and modality shape information (or eventually any meta information about modality)
 
             text.append(torch.cat(batch_text))
             modality_tokens.append(batch_modality_tokens)
