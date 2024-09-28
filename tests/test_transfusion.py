@@ -1,7 +1,9 @@
 import pytest
 from functools import partial
 
-from torch import nn, randint, randn, tensor
+from torch import nn, randint, randn, tensor, cuda
+
+cuda_available = cuda.is_available()
 
 from transfusion_pytorch.transfusion import (
     Transfusion,
@@ -16,7 +18,7 @@ def test_transfusion(
     use_flex_attn: bool
 ):
 
-    if use_flex_attn and not exists(flex_attention):
+    if use_flex_attn and (not exists(flex_attention) or not cuda_available):
         return pytest.skip()
 
     text_tokens = 8
@@ -32,6 +34,9 @@ def test_transfusion(
             use_flex_attn = use_flex_attn
         )
     )
+
+    if use_flex_attn:
+        model = model.cuda()
 
     # then for the Tensors of type float, you can pass a tuple[int, Tensor] and specify the modality index in the first position
 
@@ -56,7 +61,7 @@ def test_auto_modality_transform(
     use_flex_attn: bool
 ):
 
-    if use_flex_attn and not exists(flex_attention):
+    if use_flex_attn and (not exists(flex_attention) or not cuda_available):
         return pytest.skip()
 
     text_tokens = 8
@@ -96,7 +101,7 @@ def test_text(
     return_loss: bool
 ):
 
-    if use_flex_attn and not exists(flex_attention):
+    if use_flex_attn and (not exists(flex_attention) or not cuda_available):
         return pytest.skip()
 
     model = Transfusion(
@@ -110,6 +115,9 @@ def test_text(
             use_flex_attn = use_flex_attn
         )
     )
+
+    if use_flex_attn:
+        model = model.cuda()
 
     text = randint(0, 256, (2, 1024))
 
