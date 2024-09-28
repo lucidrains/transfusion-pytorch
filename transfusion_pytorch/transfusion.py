@@ -701,6 +701,7 @@ class Transformer(Module):
         ff_expansion_factor = 4,
         attn_kwargs: dict = dict(),
         ff_kwargs: dict = dict(),
+        unet_skips = True,
         use_flex_attn = False
     ):
         super().__init__()
@@ -720,7 +721,7 @@ class Transformer(Module):
         for ind in range(depth):
             is_latter_half = ind >= (depth // 2)
 
-            skip_proj = Linear(dim * 2, dim, bias = False) if is_latter_half else None
+            skip_proj = Linear(dim * 2, dim, bias = False) if is_latter_half and unet_skips else None
 
             attn = Attention(dim = dim, dim_head = dim_head, heads = heads, dropout = dropout, use_flex_attn = use_flex_attn, **attn_kwargs)
 
@@ -815,10 +816,12 @@ class Transformer(Module):
             if is_first_half:
                 skips.append(x)
 
-            if is_later_half:
+            if is_later_half and exists(skip_proj):
                 skip = skips.pop()
+
+                residual = x
                 x = torch.cat((x, skip), dim = -1)
-                x = skip_proj(x)
+                x = skip_proj(x) + residual
 
             # attention and feedforward
 
