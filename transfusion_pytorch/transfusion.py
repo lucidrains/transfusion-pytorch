@@ -12,6 +12,8 @@ l - logits (text)
 i, j - sequence (row, col)
 """
 
+import os
+
 import math
 from functools import partial
 from typing import NamedTuple, Callable, Literal
@@ -29,8 +31,6 @@ from einops.layers.torch import Rearrange
 
 from rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
 
-from beartype import beartype
-from beartype.door import is_bearable
 from tqdm import tqdm
 
 pad_sequence = partial(pad_sequence, batch_first = True)
@@ -38,6 +38,9 @@ pad_sequence = partial(pad_sequence, batch_first = True)
 # tensor typing
 
 import jaxtyping
+from jaxtyping import jaxtyped
+from beartype import beartype
+from beartype.door import is_bearable
 
 class TorchTyping:
     def __init__(self, abstract_dtype):
@@ -63,11 +66,11 @@ except ImportError:
 
 # constants
 
-ModalitySample = list[Int['_'] | Float['_ _'] | tuple[int, Float['_ _']]]
+ModalitySample = list[Int['_'] | Float['...'] | tuple[int, Float['_ _']]]
 
 ModalityTokenTransform = str | Callable | None
 
-RawModalityPositions = list[list[tuple[int, int]]]
+RawModalityPositions = list[list[tuple[int, int, int]]]
 
 class LossBreakdown(NamedTuple):
     total: Float['']
@@ -111,6 +114,10 @@ def eval_decorator(fn):
         self.train(was_training)
         return out
     return inner
+
+# maybe typecheck
+
+typecheck = jaxtyped(typechecker = beartype) if os.environ.get('TYPECHECK', '').lower() in ('1', 'true') else identity
 
 # default function for constituting modality shape from string
 
@@ -233,6 +240,7 @@ def softcap_score_mod(softcap):
 
 # converting a raw list of modality offsets and lengths to tensor
 
+@typecheck
 def modality_positions_to_tensor(
     modalities: RawModalityPositions,
     pad_value = 0,
@@ -245,10 +253,11 @@ def modality_positions_to_tensor(
     if modalities.ndim == 2:
         modalities = modalities.reshape(*modalities.shape, 3)
 
-    return modalities
+    return modalities.long()
 
 # sanitizing modalities tensor, making sure it is ordered
 
+@typecheck
 def order_modality_positions_by_seq_offset(
     modalities: Int['b m 3']
 ) -> tuple[Int['b m 3'], Int['b m']]:
@@ -312,6 +321,7 @@ def embed_modality_tokens(
 
 # functions for managing modality token mask
 
+@typecheck
 def modality_positions_to_is_modality_mask(
     seq_len: int,
     modalities: Int['b m 3'],
@@ -342,6 +352,7 @@ def modality_positions_to_is_modality_mask(
 
     return einx.logical_and('b t m, b m n -> b t m n', is_instance_for_type, is_modality_along_seq)
 
+@typecheck
 def naive_attn_mask(
     seq_len: int,
     modalities: Int['b m 3'],
@@ -383,10 +394,11 @@ class RandomFourierEmbed(Module):
         self.dim = dim
         self.register_buffer('weights', torch.randn(dim // 2))
 
+    @typecheck
     def forward(
         self,
         times: Float['b n'] | Float['b']
-    ) -> Float['b n {self.dim + 1}']:
+    ) -> Float['b n {self.dim+1}']:
 
         if times.ndim == 1:
             times = rearrange(times, 'b -> b 1')
@@ -429,6 +441,7 @@ class AdaptiveWrapper(Module):
         nn.init.zeros_(self.to_ada_ln_zero.weight)
         nn.init.constant_(self.to_ada_ln_zero.bias, ada_ln_zero_init_bias)
 
+    @typecheck
     def forward_text(
         self,
         x: Float['b n {self.dim}'],
@@ -453,6 +466,7 @@ class AdaptiveWrapper(Module):
 
         return out
 
+    @typecheck
     def forward_modality(
         self,
         x: Float['b n {self.dim}'],
@@ -487,6 +501,7 @@ class AdaptiveWrapper(Module):
 
         return modalities_out
 
+    @typecheck
     def forward(
         self,
         x: Float['b n {self.dim}'],
@@ -746,17 +761,18 @@ class Transformer(Module):
         self.layers = layers
         self.norm = RMSNorm(dim)
 
+    @typecheck
     def forward(
         self,
         x,
         times: Float[''] | Float['b'] | Float['b n'] | None = None,
         attn_mask: Bool['b i j'] | None = None,
-        modality_positions: RawModalityPositions | Int['b n 2'] | None = None,
+        modality_positions: RawModalityPositions | Int['b m 3'] | None = None,
         is_any_modality: bool | Bool['b n'] | None = None,
         rotary_emb: Tensor | None = None,
         cache: Tensor | None = None,
         modality_only = False,
-        causal_mask: bool = False,
+        causal_mask = False,
         return_kv_cache = False
     ):
         batch, seq_len, device, input_is_cuda = x.shape[0], x.shape[-2], x.device, x.is_cuda
@@ -1026,6 +1042,7 @@ class Transfusion(Module):
 
     @torch.no_grad()
     @eval_decorator
+    @typecheck
     def sample(
         self,
         prompt: ModalitySample | None = None,
@@ -1251,6 +1268,7 @@ class Transfusion(Module):
 
         return processed_modality_sample
 
+    @typecheck
     def forward_text(
         self,
         text: Int['b n'],
@@ -1259,8 +1277,8 @@ class Transfusion(Module):
         cache: Tensor | None = None,
         return_kv_cache = False
     ) -> (
-        Float[''],
-        Float['b n d'],
+        Float[''] |
+        Float['b n d'] |
         tuple[Float['b n d'], list[Float['...']]]
     ):
 
@@ -1309,6 +1327,7 @@ class Transfusion(Module):
 
         return loss
 
+    @typecheck
     def forward_modality(
         self,
         modalities: Float['b ...'],
@@ -1371,6 +1390,7 @@ class Transfusion(Module):
 
         return F.mse_loss(pred_flow, flow)
 
+    @typecheck
     def forward(
         self,
         modalities: (
@@ -1388,9 +1408,9 @@ class Transfusion(Module):
         return_embed = False,
         return_kv_cache = False,
     ) -> (
-        Float['b n l'] |
-        Float['b n d'] |
-        tuple[Float['b n _'], list[Float['...']]] |
+        Float['b _ l'] |
+        Float['b _ d'] |
+        tuple[Float['b _ _'], Tensor] |
         Float[''] |
         tuple[Float[''], LossBreakdown]
     ):
