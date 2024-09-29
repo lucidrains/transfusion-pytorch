@@ -613,16 +613,17 @@ class Attention(Module):
     def forward(
         self,
         x,
-        attn_mask: Tensor | None = None,
+        attn_mask: Tensor | None = None, # for manual masking
         rotary_emb: Tensor | None = None,
         cache: Tensor | None = None,
         causal = False,
-        block_mask = None,
+        block_mask = None, # only passed in for flex attention
         return_kv_cache = False
     ):
         device = x.device
 
         assert not (exists(block_mask) and exists(attn_mask))
+        assert not (not self.use_flex_attn and exists(block_mask)), 'you cannot pass in the `block_mask` if `use_flex_attn` was not set to be `True`'
 
         x = self.norm(x)
 
@@ -748,7 +749,10 @@ class Transformer(Module):
         causal_mask: bool = False,
         return_kv_cache = False
     ):
-        batch, seq_len, device = x.shape[0], x.shape[-2], x.device
+        batch, seq_len, device, input_is_cuda = x.shape[0], x.shape[-2], x.device, x.is_cuda
+
+        should_use_flex_attn = input_is_cuda and self.use_flex_attn
+
         assert not (exists(attn_mask) and exists(modality_positions))
 
         # handle time
@@ -766,7 +770,7 @@ class Transformer(Module):
         attn_mask_kwargs = dict()
 
         if causal_mask:
-            if self.use_flex_attn:
+            if should_use_flex_attn:
                 block_mask = create_block_mask(causal, B = None, H = None, Q_LEN = seq_len, KV_LEN = seq_len, device = device)
                 attn_mask_kwargs.update(block_mask = block_mask)
             else:
@@ -775,7 +779,7 @@ class Transformer(Module):
         if exists(modality_positions):
             assert not causal_mask
 
-            if self.use_flex_attn:
+            if should_use_flex_attn:
                 transfusion_mask_fn = transfusion_attn_mask(modality_positions)
                 block_mask = create_block_mask(transfusion_mask_fn, B = None, H = None, Q_LEN = seq_len, KV_LEN = seq_len, device = device)
                 attn_mask_kwargs.update(block_mask = block_mask)
