@@ -620,10 +620,20 @@ class Attention(Module):
         block_mask = None, # only passed in for flex attention
         return_kv_cache = False
     ):
-        device = x.device
+        device, input_is_cuda, is_decoding_with_cache = x.device, x.is_cuda, exists(cache)
+
+        should_use_flex_attn = self.use_flex_attn and input_is_cuda
+
+        # handle maybe mask
+        # if receiving kv cache, assume decoding and turn off all masking
+
+        if is_decoding_with_cache:
+            block_mask = attn_mask = None
 
         assert not (exists(block_mask) and exists(attn_mask))
         assert not (not self.use_flex_attn and exists(block_mask)), 'you cannot pass in the `block_mask` if `use_flex_attn` was not set to be `True`'
+
+        # pre rmsnorm and project to queries, keys, values
 
         x = self.norm(x)
 
@@ -644,11 +654,11 @@ class Attention(Module):
         # rotary embeddings
 
         if exists(rotary_emb):
-            q, k = tuple(apply_rotary_emb(rotary_emb, t) for t in (q, k))
+            q, k = tuple(apply_rotary_emb(rotary_emb[..., -t.shape[-2]:, :], t) for t in (q, k))
 
         # whether to use flex attention or not
 
-        if self.use_flex_attn:
+        if should_use_flex_attn:
             assert not causal, 'causal mask should be constructed in transformer'
 
             flex_attn_kwargs = dict(block_mask = block_mask)
@@ -751,7 +761,10 @@ class Transformer(Module):
     ):
         batch, seq_len, device, input_is_cuda = x.shape[0], x.shape[-2], x.device, x.is_cuda
 
-        should_use_flex_attn = input_is_cuda and self.use_flex_attn
+        is_decoding_with_cache = exists(cache)
+        needs_masking = not is_decoding_with_cache
+
+        should_use_flex_attn = input_is_cuda and needs_masking and self.use_flex_attn
 
         assert not (exists(attn_mask) and exists(modality_positions))
 
@@ -769,27 +782,41 @@ class Transformer(Module):
 
         attn_mask_kwargs = dict()
 
-        if causal_mask:
-            if should_use_flex_attn:
-                block_mask = create_block_mask(causal, B = None, H = None, Q_LEN = seq_len, KV_LEN = seq_len, device = device)
-                attn_mask_kwargs.update(block_mask = block_mask)
-            else:
-                attn_mask_kwargs.update(causal = True)
+        if needs_masking:
+            if causal_mask:
+                if should_use_flex_attn:
+                    block_mask = create_block_mask(causal, B = None, H = None, Q_LEN = seq_len, KV_LEN = seq_len, device = device)
+                    attn_mask_kwargs.update(block_mask = block_mask)
+                else:
+                    attn_mask_kwargs.update(causal = True)
 
-        if exists(modality_positions):
-            assert not causal_mask
+            if exists(modality_positions):
+                assert not causal_mask
 
-            if should_use_flex_attn:
-                transfusion_mask_fn = transfusion_attn_mask(modality_positions)
-                block_mask = create_block_mask(transfusion_mask_fn, B = None, H = None, Q_LEN = seq_len, KV_LEN = seq_len, device = device)
-                attn_mask_kwargs.update(block_mask = block_mask)
-            else:
-                attn_mask = naive_attn_mask(seq_len, modality_positions, device = device)
-                attn_mask_kwargs.update(attn_mask = attn_mask)
+                if should_use_flex_attn:
+                    transfusion_mask_fn = transfusion_attn_mask(modality_positions)
+                    block_mask = create_block_mask(transfusion_mask_fn, B = None, H = None, Q_LEN = seq_len, KV_LEN = seq_len, device = device)
+                    attn_mask_kwargs.update(block_mask = block_mask)
+                else:
+                    attn_mask = naive_attn_mask(seq_len, modality_positions, device = device)
+                    attn_mask_kwargs.update(attn_mask = attn_mask)
 
         if not exists(is_any_modality) and exists(modality_positions):
             is_any_modality = modality_positions_to_is_modality_mask(seq_len, modality_positions).any(dim = 1)
             is_any_modality = reduce(is_any_modality, 'b t n -> b n', 'any')
+
+        # handle kv caching
+
+        if is_decoding_with_cache:
+            cache_length = first(cache).shape[-2]
+
+            x = x[..., cache_length:, :]
+            cond = cond[..., cache_length:, :]
+
+            if torch.is_tensor(is_any_modality):
+                is_any_modality = is_any_modality[..., cache_length:]
+
+        # adaptive layernorm kwargs, which handles text and modality tokens differently
 
         adaptive_kwargs = dict(
             cond = cond,
@@ -1618,6 +1645,7 @@ class Transfusion(Module):
             rotary_emb = rotary_emb,
             modality_positions = modality_positions,
             is_any_modality = is_any_modality_when_decoding,
+            cache = cache,
             return_kv_cache = True
         )
 
