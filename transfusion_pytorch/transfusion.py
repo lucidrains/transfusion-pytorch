@@ -669,7 +669,7 @@ class Attention(Module):
         # rotary embeddings
 
         if exists(rotary_emb):
-            q, k = tuple(apply_rotary_emb(rotary_emb[..., -t.shape[-2]:, :], t) for t in (q, k))
+            q, k = tuple(apply_rotary_emb(rotary_emb, t, freqs_seq_dim = -2) for t in (q, k))
 
         # whether to use flex attention or not
 
