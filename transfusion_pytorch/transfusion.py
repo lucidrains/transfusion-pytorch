@@ -600,7 +600,8 @@ class Attention(Module):
         heads = 8,
         dropout = 0.,
         softcap_value = 50.,
-        use_flex_attn = False
+        use_flex_attn = False,
+        gate_values = True
     ):
         super().__init__()
         self.scale = dim_head ** -0.5
@@ -615,6 +616,11 @@ class Attention(Module):
             Linear(dim, dim_inner * 3, bias = False),
             Rearrange('b n (qkv h d) -> qkv b h n d', qkv = 3, h = heads)
         )
+
+        self.to_gates = nn.Sequential(
+            nn.Linear(dim, heads, bias = False),
+            Rearrange('b n h -> b h n 1', h = heads)
+        ) if gate_values else None
 
         self.softcap_value = softcap_value
 
@@ -704,6 +710,11 @@ class Attention(Module):
             attn = self.dropout(attn)
 
             out = einsum(attn, v, 'b h i j, b h j d -> b h i d')
+
+        # maybe gate values
+
+        if exists(self.to_gates):
+            out = out * self.to_gates(x).sigmoid()
 
         # combine heads and out
 
