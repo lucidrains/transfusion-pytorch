@@ -76,6 +76,7 @@ class LossBreakdown(NamedTuple):
     total: Float['']
     text: Float['']
     flow: list[Float['']]
+    velocity: list[Float['']] | None
 
 # helper functions
 
@@ -925,6 +926,7 @@ class Transfusion(Module):
         to_modality_shape_fn: Callable | tuple[Callable, ...] = default_to_modality_shape_fn,
         ignore_index = -1,
         flow_loss_weight = 1.,
+        velocity_consistency_loss_weight = 1.,
         odeint_kwargs: dict = dict(
             atol = 1e-5,
             rtol = 1e-5,
@@ -1044,6 +1046,10 @@ class Transfusion(Module):
 
         self.ignore_index = ignore_index
         self.flow_loss_weight = flow_loss_weight
+
+        # velocity consistency weight - only added if EMA model is passed in during training
+
+        self.velocity_consistency_loss_weight = velocity_consistency_loss_weight
 
         # flow sampling related
 
@@ -1416,6 +1422,9 @@ class Transfusion(Module):
         modality_type: int | None = None,
         cache: Tensor | None = None,
         decoding_text_or_modality: Literal['text', 'modality'] | None = None,
+        velocity_consistency_ema_model: Transfusion | None = None,
+        velocity_consistency_delta_time = 1e-3,
+        return_only_pred_flows = False,
         return_loss = True,
         return_breakdown = False,
         return_embed = False,
@@ -1425,12 +1434,15 @@ class Transfusion(Module):
         Float['b _ d'] |
         tuple[Float['b _ _'], Tensor] |
         Float[''] |
-        tuple[Float[''], LossBreakdown]
+        tuple[Float[''], LossBreakdown] |
+        list[Float['b _ _']]
     ):
         is_decoding = exists(decoding_text_or_modality)
 
         is_text_only = torch.is_tensor(modalities) and modalities.dtype in (torch.int, torch.long)
         is_modality_only = torch.is_tensor(modalities) and modalities.dtype == torch.float
+
+        need_velocity_matching = not is_decoding and exists(velocity_consistency_ema_model)
 
         return_loss &= (not return_embed or not is_decoding)
 
@@ -1451,6 +1463,14 @@ class Transfusion(Module):
 
         device = self.device
         tensor_ = partial(tensor, device = device)
+
+        # save a copy for ema model for velocity matching
+
+        if need_velocity_matching:
+            velocity_modalities = modalities
+
+            if isinstance(velocity_modalities, list):
+                velocity_modalities = [modality.copy() for modality in velocity_modalities]
 
         # add "sentence" start and end tokens when training
 
@@ -1615,7 +1635,7 @@ class Transfusion(Module):
             if exists(modality_length_to_times_fn):
                 times = modality_length_to_times_fn(modality_positions[..., -1])
 
-        times = einsum(is_modalities.float(), times, 'b t m n, b m -> b t n')
+        times_per_token = einsum(is_modalities.float(), times, 'b t m n, b m -> b t n')
 
         if return_loss:
             noised_modality_tokens = []
@@ -1624,7 +1644,7 @@ class Transfusion(Module):
             for modality_id, one_modality_tokens in enumerate(modality_tokens):
                 noise = torch.randn_like(one_modality_tokens)
 
-                one_times = times[:, modality_id]
+                one_times = times_per_token[:, modality_id]
                 padded_times = rearrange(one_times, 'b n -> b n 1')
 
                 one_noised_modality_tokens = one_modality_tokens * padded_times + noise * (1. - padded_times)
@@ -1668,13 +1688,13 @@ class Transfusion(Module):
 
         # times
 
-        times = reduce(times, 'b t n -> b n', 'sum')
+        times_cond = reduce(times_per_token, 'b t n -> b n', 'sum')
 
         # attention
 
         embed, kv_cache = self.transformer(
             tokens,
-            times = times,
+            times = times_cond,
             rotary_emb = rotary_emb,
             modality_positions = modality_positions,
             is_any_modality = is_any_modality_when_decoding,
@@ -1700,6 +1720,15 @@ class Transfusion(Module):
 
             return text_logits, kv_cache
 
+        # flow loss
+
+        pred_flows = [fn(embed) for fn in self.model_to_latent_preds]
+
+        # early return for velocity consistency ema model
+
+        if return_only_pred_flows:
+            return pred_flows
+
         # calculate total tokens for weighing the loss
 
         total_tokens = (text_labels != self.ignore_index).sum()
@@ -1716,9 +1745,7 @@ class Transfusion(Module):
 
         text_loss_weight = (text_labels != self.ignore_index).sum() / total_tokens
 
-        # flow loss
-
-        pred_flows = [fn(embed) for fn in self.model_to_latent_preds]
+        # calculate flow losses
 
         flow_losses = []
         modality_loss_weights = []
@@ -1741,14 +1768,56 @@ class Transfusion(Module):
 
             flow_losses.append(flow_loss)
 
+        modality_loss_weights = torch.stack(modality_loss_weights)
+
         # only the token positions that are not modalities have autoregressive loss
 
         total_loss = (
             text_loss * text_loss_weight +
-            (torch.stack(flow_losses) * torch.stack(modality_loss_weights)).sum() * self.flow_loss_weight
+            (torch.stack(flow_losses) * modality_loss_weights).sum() * self.flow_loss_weight
         )
+
+        # whether to handle velocity consistency
+        # for straightening the flow, from consistency flow matching paper https://arxiv.org/abs/2407.02398
+
+        velocity_match_losses = None
+
+        if need_velocity_matching:
+
+            with torch.no_grad():
+                velocity_consistency_ema_model.eval()
+
+                ema_pred_flows = velocity_consistency_ema_model(
+                    velocity_modalities,
+                    times = times + velocity_consistency_delta_time,
+                    return_only_pred_flows = True,
+                    return_loss = True
+                )
+
+            velocity_match_losses = []
+
+            for ema_pred_flow, pred_flow, is_one_modality in zip(ema_pred_flows, pred_flows, is_modalities.unbind(dim = 1)):
+
+                velocity_match_loss = F.mse_loss(
+                    pred_flow,
+                    ema_pred_flow,
+                    reduction = 'none'
+                )
+
+                is_one_modality = reduce(is_one_modality, 'b m n -> b n', 'any')
+
+                velocity_match_loss = velocity_match_loss[is_one_modality].mean()
+
+                velocity_match_losses.append(velocity_match_loss)
+
+            total_loss = (
+                total_loss +
+                (torch.stack(velocity_match_losses) * modality_loss_weights).sum() * self.velocity_consistency_loss_weight
+            )
+
+        # return total loss if no breakdown needed
 
         if not return_breakdown:
             return total_loss
 
-        return total_loss, LossBreakdown(total_loss, text_loss, flow_losses)
+        return total_loss, LossBreakdown(total_loss, text_loss, flow_losses, velocity_match_losses)
