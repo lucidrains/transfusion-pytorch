@@ -178,3 +178,14 @@ print_modality_sample(one_multimodal_sample)
     url       = {https://api.semanticscholar.org/CorpusID:272832492}
 }
 ```
+
+```bibtex
+@article{Yang2024ConsistencyFM,
+    title   = {Consistency Flow Matching: Defining Straight Flows with Velocity Consistency},
+    author  = {Ling Yang and Zixiang Zhang and Zhilong Zhang and Xingchao Liu and Minkai Xu and Wentao Zhang and Chenlin Meng and Stefano Ermon and Bin Cui},
+    journal = {ArXiv},
+    year    = {2024},
+    volume  = {abs/2407.02398},
+    url     = {https://api.semanticscholar.org/CorpusID:270878436}
+}
+```

@@ -1,5 +1,6 @@
 import pytest
 from functools import partial
+from copy import deepcopy
 
 from torch import nn, randint, randn, tensor, cuda
 
@@ -200,3 +201,54 @@ def test_text_image_end_to_end(
     # after much training
 
     one_multimodal_sample = model.sample()
+
+def test_velocity_consistency():
+    mock_encoder = nn.Conv2d(3, 384, 3, padding = 1)
+    mock_decoder = nn.Conv2d(384, 3, 3, padding = 1)
+
+    model = Transfusion(
+        num_text_tokens = 12,
+        dim_latent = 384,
+        channel_first_latent = True,
+        modality_default_shape = ((4, 4)),
+        modality_validate_num_dim = 2,
+        modality_encoder = mock_encoder,
+        modality_decoder = mock_decoder,
+        transformer = dict(
+            dim = 512,
+            depth = 1
+        )
+    )
+
+    ema_model = deepcopy(model)
+
+    text_and_images = [
+        [
+            randint(0, 12, (16,)),
+            randn(3, 8, 8),
+            randint(0, 12, (8,)),
+            randn(3, 7, 7)
+        ],
+        [
+            randint(0, 12, (16,)),
+            randn(3, 8, 5),
+            randint(0, 12, (5,)),
+            randn(3, 2, 16),
+            randint(0, 12, (9,))
+        ]
+    ]
+
+    def modality_length_to_times(modality_length):
+        has_modality = modality_length > 0
+        return torch.where(has_modality, torch.ones_like(modality_length), 0.)
+
+    loss, breakdown = model(
+        text_and_images,
+        velocity_consistency_ema_model = ema_model,
+        modality_length_to_times_fn = modality_length_to_times,
+        return_breakdown = True
+    )
+
+    loss.backward()
+
+    assert exists(breakdown.velocity)
