@@ -2,6 +2,7 @@ import pytest
 from functools import partial
 from copy import deepcopy
 
+import torch
 from torch import nn, randint, randn, tensor, cuda
 
 cuda_available = cuda.is_available()
