@@ -1640,7 +1640,7 @@ class Transfusion(Module):
         # noise the modality tokens
 
         if not exists(times):
-            modality_length_to_times_fn = default(default_modality_length_to_time_fn, modality_length_to_times_fn)
+            modality_length_to_times_fn = default(modality_length_to_times_fn, default_modality_length_to_time_fn)
 
             if exists(modality_length_to_times_fn):
                 times = modality_length_to_times_fn(modality_positions[..., -1])
