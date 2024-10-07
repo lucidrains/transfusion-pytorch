@@ -756,7 +756,7 @@ class Transformer(Module):
         layers = ModuleList([])
 
         for ind in range(depth):
-            is_latter_half = ind >= (depth // 2)
+            is_latter_half = ind >= (depth / 2)
 
             skip_proj = Linear(dim * 2, dim, bias = False) if is_latter_half and unet_skips else None
 
@@ -896,6 +896,8 @@ class Transformer(Module):
 
             x = attn_out + x
             x = ff(x, **adaptive_kwargs) + x
+
+        assert len(skips) == 0
 
         out = self.norm(x)
 
