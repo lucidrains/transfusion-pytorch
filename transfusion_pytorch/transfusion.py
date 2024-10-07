@@ -29,6 +29,8 @@ import einx
 from einops import rearrange, repeat, reduce, einsum, pack
 from einops.layers.torch import Rearrange
 
+from ema_pytorch import EMA
+
 from rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
 
 from tqdm import tqdm
@@ -1422,7 +1424,7 @@ class Transfusion(Module):
         modality_type: int | None = None,
         cache: Tensor | None = None,
         decoding_text_or_modality: Literal['text', 'modality'] | None = None,
-        velocity_consistency_ema_model: Transfusion | None = None,
+        velocity_consistency_ema_model: Transfusion | EMA | None = None,
         velocity_consistency_delta_time = 1e-3,
         return_only_pred_flows = False,
         return_loss = True,
@@ -1442,9 +1444,17 @@ class Transfusion(Module):
         is_text_only = torch.is_tensor(modalities) and modalities.dtype in (torch.int, torch.long)
         is_modality_only = torch.is_tensor(modalities) and modalities.dtype == torch.float
 
+        # handle ema model being passed in for velocity consistency loss
+
+        if isinstance(velocity_consistency_ema_model, EMA):
+            assert isinstance(velocity_consistency_ema_model.ema_model, Transfusion)
+            velocity_consistency_ema_model = velocity_consistency_ema_model.ema_model
+
         need_velocity_matching = not is_decoding and exists(velocity_consistency_ema_model)
 
-        return_loss &= (not return_embed or not is_decoding)
+        # return loss
+
+        return_loss &= not (return_embed or is_decoding)
 
         if is_text_only:
 
