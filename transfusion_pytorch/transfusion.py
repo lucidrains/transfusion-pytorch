@@ -1647,6 +1647,13 @@ class Transfusion(Module):
 
         times_per_token = einsum(is_modalities.float(), times, 'b t m n, b m -> b t n')
 
+        # if needs velocity matching, make sure times are in the range of 0 - (1. - <velocity consistency delta time>)
+
+        if need_velocity_matching:
+            times_per_token = times_per_token * (1. - velocity_consistency_delta_time)
+
+        # noise only if returning loss
+
         if return_loss:
             noised_modality_tokens = []
             flows = []
