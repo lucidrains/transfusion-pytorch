@@ -965,6 +965,7 @@ class Transfusion(Module):
         transformer: dict | Transformer,
         dim_latent: int | tuple[int, ...] | None = None,
         channel_first_latent = False,
+        add_pos_emb: bool | tuple[bool, ...] = False,
         modality_encoder: Module | tuple[Module, ...] | None = None,
         modality_decoder: Module | tuple[Module, ...] | None = None,
         modality_token_transform: tuple[ModalityTokenTransform, ...] | ModalityTokenTransform | None = None,
@@ -1016,6 +1017,28 @@ class Transfusion(Module):
 
         self.modality_validate_num_dim = cast_tuple(modality_validate_num_dim, self.num_modalities)
         assert len(self.modality_validate_num_dim) == self.num_modalities
+
+        # whether to add an extra axial positional embedding per modality
+
+        self.add_pos_emb = cast_tuple(add_pos_emb, self.num_modalities)
+        assert len(self.add_pos_emb) == self.num_modalities
+
+        self.pos_emb_mlp = ModuleList([])
+
+        for modality_add_pos_emb, modality_ndim in zip(self.add_pos_emb, self.modality_validate_num_dim):
+
+            if not modality_add_pos_emb:
+                self.pos_emb_mlp.append(None)
+                continue
+
+            assert exists(modality_ndim)
+
+            pos_generating_mlp = MLPAxialPositions(
+                dim = dim,
+                num_dimensions = modality_ndim,
+            )
+
+            self.pos_emb_mlp.append(pos_generating_mlp)
 
         # modality encoders and decoders
 
