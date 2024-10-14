@@ -411,11 +411,19 @@ class MLPAxialPositions(Module):
             nn.Linear(dim_hidden, dim)
         )
 
+        # tensor typing
+
+        self._d = dim
+
     @typecheck
     def forward(
         self,
-        modality_shape: Int['p'],
-    ):
+        modality_shape: Int['p'] | torch.Size,
+    ) -> Float['... {self._d}']:
+
+        if isinstance(modality_shape, torch.Size):
+            modality_shape = tensor(modality_shape)
+
         device = modality_shape.device
         assert modality_shape.shape[-1] == self.num_dimensions
         dimensions = modality_shape.tolist()
