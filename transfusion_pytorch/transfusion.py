@@ -10,6 +10,7 @@ n - sequence
 d - dimension
 l - logits (text)
 i, j - sequence (row, col)
+p - positions
 """
 
 import os
@@ -24,6 +25,8 @@ import torch.nn.functional as F
 from torch.nn import Module, ModuleList, Linear
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils._pytree import tree_map
+
+from torchdiffeq import odeint
 
 import einx
 from einops import rearrange, repeat, reduce, einsum, pack
@@ -386,7 +389,41 @@ def min_p_filter(logits, min_p = 0.1):
     limit = min_p * max_probs
     return torch.where(probs < limit, float('-inf'), logits)
 
-from torchdiffeq import odeint
+# MLP parameterized N-dimensional positions
+
+class MLPAxialPositions(Module):
+    def __init__(
+        self,
+        *,
+        num_dimensions, # 2 for images, 3 for video, etc etc
+        dim,
+        expand_factor = 2.
+    ):
+        super().__init__()
+        self.num_dimensions = num_dimensions
+        dim_hidden = int(dim * expand_factor)
+
+        self.mlp = nn.Sequential(
+            nn.Linear(num_dimensions, dim),
+            nn.SiLU(),
+            nn.Linear(dim, dim_hidden),
+            nn.SiLU(),
+            nn.Linear(dim_hidden, dim)
+        )
+
+    @typecheck
+    def forward(
+        self,
+        modality_shape: Int['p'],
+    ):
+        device = modality_shape.device
+        assert modality_shape.shape[-1] == self.num_dimensions
+        dimensions = modality_shape.tolist()
+
+        grid = torch.meshgrid([torch.arange(dim_len, device = device) for dim_len in dimensions], indexing = 'ij')
+        axial_positions = torch.stack(grid, dim = -1)
+
+        return self.mlp(axial_positions.float())
 
 # random fourier embedding
 
