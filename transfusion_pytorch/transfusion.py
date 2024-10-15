@@ -1424,6 +1424,8 @@ class Transfusion(Module):
         return_loss = True
     ) -> Float['']:
 
+        shape = modalities.shape
+
         if self.num_modalities > 1:
             assert exists(modality_type), '`modality_type` must be explicitly passed in on forward when training on greater than 1 modality'
 
@@ -1433,12 +1435,32 @@ class Transfusion(Module):
         latent_to_model_fn = self.latent_to_model_projs[modality_type]
         model_to_flow_pred_fn = self.model_to_latent_preds[modality_type]
 
+        # grab the shape of the modality, for maybe axial pos emb
+
+        add_pos_emb = self.add_pos_emb[modality_type]
+        maybe_pos_emb_mlp = self.pos_emb_mlp[modality_type]
+        modality_num_dim = self.modality_num_dim[modality_type]
+
+        if add_pos_emb:
+            assert exists(modality_num_dim), f'modality_num_dim must be set for modality {modality_type} if further injecting axial positional embedding'
+
+            if self.channel_first_latent:
+                _, _, *axial_dims = shape
+            else:
+                _, *axial_dims, _ = shape
+
+            assert len(axial_dims) == modality_num_dim, f'received modalities of ndim {len(axial_dims)} but expected {modality_num_dim}'
+
+        # maybe transform
+
         tokens = transform(modalities)
 
         # maybe channel first
 
         if self.channel_first_latent:
-            tokens = rearrange(tokens, 'b d ... -> b (...) d')
+            tokens = rearrange(tokens, 'b d ... -> b ... d')
+
+        tokens = rearrange(tokens, 'b ... d -> b (...) d')
 
         # rotary
 
@@ -1459,9 +1481,16 @@ class Transfusion(Module):
 
         flow = tokens - noise
 
-        # attention
-
         noised_tokens = latent_to_model_fn(noised_tokens)
+
+        # maybe add axial pos emb
+
+        if add_pos_emb:
+            axial_pos_emb = maybe_pos_emb_mlp(tensor(axial_dims))
+
+            noised_tokens = noised_tokens + rearrange(axial_pos_emb, '... d -> (...) d')
+
+        # attention
 
         embed = self.transformer(
             noised_tokens,

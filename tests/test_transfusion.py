@@ -215,7 +215,7 @@ def test_velocity_consistency():
         dim_latent = 384,
         channel_first_latent = True,
         modality_default_shape = ((4, 4)),
-        modality_validate_num_dim = 2,
+        modality_num_dim = 2,
         modality_encoder = mock_encoder,
         modality_decoder = mock_decoder,
         transformer = dict(
