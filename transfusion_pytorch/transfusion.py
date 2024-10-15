@@ -431,7 +431,7 @@ class MLPAxialPositions(Module):
 
         modality_shape = modality_shape.to(self.device)
 
-        assert modality_shape.shape[-1] == self.num_dimensions
+        assert len(modality_shape) == self.num_dimensions
         dimensions = modality_shape.tolist()
 
         grid = torch.meshgrid([torch.arange(dim_len, device = self.device) for dim_len in dimensions], indexing = 'ij')
