@@ -1031,7 +1031,7 @@ class Transfusion(Module):
                 self.pos_emb_mlp.append(None)
                 continue
 
-            assert exists(modality_ndim)
+            assert exists(modality_ndim), '`modality_num_dim` must be set if you wish to automatically inject axial positional embeddings'
 
             pos_generating_mlp = MLPAxialPositions(
                 dim = dim,
