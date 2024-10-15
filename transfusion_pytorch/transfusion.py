@@ -423,6 +423,7 @@ class MLPAxialPositions(Module):
     def forward(
         self,
         modality_shape: Int['p'] | torch.Size,
+        flatten_dims = False
     ) -> Float['... {self._d}']:
 
         if isinstance(modality_shape, torch.Size):
@@ -436,7 +437,12 @@ class MLPAxialPositions(Module):
         grid = torch.meshgrid([torch.arange(dim_len, device = self.device) for dim_len in dimensions], indexing = 'ij')
         axial_positions = torch.stack(grid, dim = -1)
 
-        return self.mlp(axial_positions.float())
+        pos_emb = self.mlp(axial_positions.float())
+
+        if flatten_dims:
+            pos_emb = rearrange(pos_emb, '... d -> (...) d')
+
+        return pos_emb
 
 # random fourier embedding
 
@@ -1706,8 +1712,7 @@ class Transfusion(Module):
                     modality_pos_mlp = self.pos_emb_mlp[modality_type]
 
                     if exists(modality_pos_mlp):
-                        pos_emb = modality_pos_mlp(tensor(modality_shape_tuple))
-                        pos_emb = rearrange(pos_emb, '... d -> (...) d')
+                        pos_emb = modality_pos_mlp(tensor(modality_shape_tuple), flatten_dims= True)
 
                         pos_emb = F.pad(pos_emb, (0, 0, prec_meta_tag_length, 1), value = 0.)
                     else:
