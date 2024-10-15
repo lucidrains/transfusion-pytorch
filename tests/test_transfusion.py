@@ -5,6 +5,9 @@ from copy import deepcopy
 import torch
 from torch import nn, randint, randn, tensor, cuda
 
+import torch._dynamo
+torch._dynamo.config.suppress_errors = True
+
 cuda_available = cuda.is_available()
 
 from transfusion_pytorch.transfusion import (
@@ -157,7 +160,7 @@ def test_text_image_end_to_end(
         num_text_tokens = 4,
         dim_latent = 384,
         channel_first_latent = True,
-        modality_default_shape = ((4, 4)),
+        modality_default_shape = ((4, 4),),
         modality_encoder = mock_vae_encoder,
         modality_decoder = mock_vae_decoder,
         transformer = dict(

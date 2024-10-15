@@ -970,7 +970,7 @@ class Transfusion(Module):
         modality_decoder: Module | tuple[Module, ...] | None = None,
         modality_token_transform: tuple[ModalityTokenTransform, ...] | ModalityTokenTransform | None = None,
         modality_default_shape: tuple[int, ...] | tuple[tuple[int, ...], ...] | None = None,
-        modality_validate_num_dim: int | tuple[int, ...] | None = None,
+        modality_num_dim: int | tuple[int, ...] | None = None,
         to_modality_shape_fn: Callable | tuple[Callable, ...] = default_to_modality_shape_fn,
         ignore_index = -1,
         flow_loss_weight = 1.,
@@ -1015,8 +1015,8 @@ class Transfusion(Module):
 
         # specifying the number of dimensions for the modality, which will be hard validated
 
-        self.modality_validate_num_dim = cast_tuple(modality_validate_num_dim, self.num_modalities)
-        assert len(self.modality_validate_num_dim) == self.num_modalities
+        self.modality_num_dim = cast_tuple(modality_num_dim, self.num_modalities)
+        assert len(self.modality_num_dim) == self.num_modalities
 
         # whether to add an extra axial positional embedding per modality
 
@@ -1025,7 +1025,7 @@ class Transfusion(Module):
 
         self.pos_emb_mlp = ModuleList([])
 
-        for modality_add_pos_emb, modality_ndim in zip(self.add_pos_emb, self.modality_validate_num_dim):
+        for modality_add_pos_emb, modality_ndim in zip(self.add_pos_emb, self.modality_num_dim):
 
             if not modality_add_pos_emb:
                 self.pos_emb_mlp.append(None)
@@ -1187,7 +1187,7 @@ class Transfusion(Module):
             maybe_meta_tensor = get_tokens_since_rightmost_id(seq, self.meta_id)
 
             default_shape = self.modality_default_shape[curr_modality_id]
-            maybe_modality_validate_num_dim = self.modality_validate_num_dim[curr_modality_id]
+            maybe_modality_num_dim = self.modality_num_dim[curr_modality_id]
 
             meta_str_to_modality_shape = self.to_modality_shape_fn[curr_modality_id]
 
@@ -1205,7 +1205,7 @@ class Transfusion(Module):
             modality_shape = default(modality_shape, default_shape)
 
             assert exists(modality_shape), f'language model did not produce a proper modality shape for modality type {curr_modality_id} - please set a fallback shape with `modality_default_shape`'
-            assert not exists(maybe_modality_validate_num_dim) or maybe_modality_validate_num_dim == len(modality_shape), f'expected modality type {curr_modality_id} to have {maybe_modality_validate_num_dim} dimensions but language model produced a shape of {modality_shape}'
+            assert not exists(maybe_modality_num_dim) or maybe_modality_num_dim == len(modality_shape), f'expected modality type {curr_modality_id} to have {maybe_modality_num_dim} dimensions but language model produced a shape of {modality_shape}'
 
             is_decoding_text = False
 
