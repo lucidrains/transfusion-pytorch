@@ -1706,11 +1706,10 @@ class Transfusion(Module):
                     modality_pos_mlp = self.pos_emb_mlp[modality_type]
 
                     if exists(modality_pos_mlp):
-                        one_modality_pos_emb = modality_pos_mlp(tensor(modality_shape_tuple))
+                        pos_emb = modality_pos_mlp(tensor(modality_shape_tuple))
+                        pos_emb = rearrange(pos_emb, '... d -> (...) d')
 
-                        one_modality_pos_emb = F.pad(one_modality_pos_emb, (0, 0, prec_meta_tag_length, 1), value = 0.)
-
-                        pos_emb = one_modality_pos_emb
+                        pos_emb = F.pad(pos_emb, (0, 0, prec_meta_tag_length, 1), value = 0.)
                     else:
                         pos_emb = torch.zeros(text_tensor.shape[0], self.dim, device = device)
 
