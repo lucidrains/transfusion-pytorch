@@ -260,8 +260,9 @@ def test_velocity_consistency():
 def test_axial_pos_emb():
     model = Transfusion(
         num_text_tokens = 256,
-        dim_latent = (384, 192),                 # specify multiple latent dimensions
-        modality_default_shape = ((2, 2), (2,)),   # default shapes for first and second modality
+        dim_latent = (384, 192),                    # specify multiple latent dimensions
+        modality_default_shape = ((2, 2), (2,)),    # default shapes for first and second modality
+        fallback_to_default_shape_if_invalid = True,
         add_pos_emb = True,
         modality_num_dim = (2, 1),
         transformer = dict(

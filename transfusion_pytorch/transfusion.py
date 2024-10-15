@@ -37,6 +37,7 @@ from ema_pytorch import EMA
 from rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
 
 from tqdm import tqdm
+from loguru import logger
 
 pad_sequence = partial(pad_sequence, batch_first = True)
 
@@ -164,7 +165,7 @@ def print_modality_sample(
         else:
             output.append(('modality', sample.shape))
 
-    print(output)
+    logger.info(output)
 
 # character based tokenizer
 
@@ -981,6 +982,7 @@ class Transfusion(Module):
         modality_decoder: Module | tuple[Module, ...] | None = None,
         modality_token_transform: tuple[ModalityTokenTransform, ...] | ModalityTokenTransform | None = None,
         modality_default_shape: tuple[int, ...] | tuple[tuple[int, ...], ...] | None = None,
+        fallback_to_default_shape_if_invalid = False,
         modality_num_dim: int | tuple[int, ...] | None = None,
         to_modality_shape_fn: Callable | tuple[Callable, ...] = default_to_modality_shape_fn,
         ignore_index = -1,
@@ -1071,6 +1073,8 @@ class Transfusion(Module):
         self.modality_default_shape = modality_default_shape
 
         assert len(self.modality_default_shape) == self.num_modalities
+
+        self.fallback_to_default_shape_if_invalid = fallback_to_default_shape_if_invalid
 
         # entire "sentence" start and end id
 
@@ -1214,6 +1218,12 @@ class Transfusion(Module):
                     modality_shape = meta_str_to_modality_shape(meta_str)
 
             modality_shape = default(modality_shape, default_shape)
+
+            if self.fallback_to_default_shape_if_invalid:
+
+                if exists(maybe_modality_num_dim) and len(modality_shape) != maybe_modality_num_dim:
+                    logger.warning(f'invalid modality shape {modality_shape} for modality {curr_modality_id}. falling back to default shape {default_shape}')
+                    modality_shape = default_shape
 
             assert exists(modality_shape), f'language model did not produce a proper modality shape for modality type {curr_modality_id} - please set a fallback shape with `modality_default_shape`'
             assert not exists(maybe_modality_num_dim) or maybe_modality_num_dim == len(modality_shape), f'expected modality type {curr_modality_id} to have {maybe_modality_num_dim} dimensions but language model produced a shape of {modality_shape}'
