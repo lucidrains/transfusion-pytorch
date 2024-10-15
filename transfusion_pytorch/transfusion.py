@@ -1305,6 +1305,8 @@ class Transfusion(Module):
                         step_times = rearrange(step_times, ' -> 1 1') # batch size of 1
                         step_times = F.pad(step_times, (num_past_modalities, 0), value = 1.) # past decoded modalities receive a time conditioning of 1.
 
+                        denoised = denoised.reshape(*modality_shape, latent_dim)
+
                         embeds, new_kv_cache = self.forward(
                             [[*modality_sample, (curr_modality_id, denoised)]],
                             times = step_times,
@@ -1507,9 +1509,9 @@ class Transfusion(Module):
         # maybe add axial pos emb
 
         if add_pos_emb:
-            axial_pos_emb = maybe_pos_emb_mlp(tensor(axial_dims))
+            axial_pos_emb = maybe_pos_emb_mlp(tensor(axial_dims), flatten_dims = True)
 
-            noised_tokens = noised_tokens + rearrange(axial_pos_emb, '... d -> (...) d')
+            noised_tokens = noised_tokens + axial_pos_emb
 
         # attention
 
