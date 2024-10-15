@@ -20,7 +20,7 @@ from functools import partial
 from typing import NamedTuple, Callable, Literal
 
 import torch
-from torch import nn, Tensor, tensor
+from torch import nn, Tensor, tensor, is_tensor
 import torch.nn.functional as F
 from torch.nn import Module, ModuleList, Linear
 from torch.nn.utils.rnn import pad_sequence
@@ -110,7 +110,7 @@ def cast_tuple(t, length = 1):
     return t if isinstance(t, tuple) else ((t,) * length)
 
 def tree_map_tensor(sample, fn: Callable):
-    return tree_map(lambda t: t if not torch.is_tensor(t) else fn(t), sample)
+    return tree_map(lambda t: t if not is_tensor(t) else fn(t), sample)
 
 def eval_decorator(fn):
     def inner(self, *args, **kwargs):
@@ -415,6 +415,10 @@ class MLPAxialPositions(Module):
 
         self._d = dim
 
+    @property
+    def device(self):
+        return next(self.parameters()).device
+
     @typecheck
     def forward(
         self,
@@ -424,11 +428,12 @@ class MLPAxialPositions(Module):
         if isinstance(modality_shape, torch.Size):
             modality_shape = tensor(modality_shape)
 
-        device = modality_shape.device
+        modality_shape = modality_shape.to(self.device)
+
         assert modality_shape.shape[-1] == self.num_dimensions
         dimensions = modality_shape.tolist()
 
-        grid = torch.meshgrid([torch.arange(dim_len, device = device) for dim_len in dimensions], indexing = 'ij')
+        grid = torch.meshgrid([torch.arange(dim_len, device = self.device) for dim_len in dimensions], indexing = 'ij')
         axial_positions = torch.stack(grid, dim = -1)
 
         return self.mlp(axial_positions.float())
@@ -888,7 +893,7 @@ class Transformer(Module):
             x = x[..., cache_length:, :]
             cond = cond[..., cache_length:, :]
 
-            if torch.is_tensor(is_any_modality):
+            if is_tensor(is_any_modality):
                 is_any_modality = is_any_modality[..., cache_length:]
 
         # adaptive layernorm kwargs, which handles text and modality tokens differently
@@ -1538,8 +1543,8 @@ class Transfusion(Module):
     ):
         is_decoding = exists(decoding_text_or_modality)
 
-        is_text_only = torch.is_tensor(modalities) and modalities.dtype in (torch.int, torch.long)
-        is_modality_only = torch.is_tensor(modalities) and modalities.dtype == torch.float
+        is_text_only = is_tensor(modalities) and modalities.dtype in (torch.int, torch.long)
+        is_modality_only = is_tensor(modalities) and modalities.dtype == torch.float
 
         # handle ema model being passed in for velocity consistency loss
 
@@ -1586,15 +1591,22 @@ class Transfusion(Module):
                 prepend(modality, tensor_([self.sos_id]))
                 modality.append(tensor_([self.eos_id]))
 
+        # need axial pos emb
+
+        need_axial_pos_emb = any(self.add_pos_emb)
+
         # process list of text and modalities interspersed with one another
 
         modality_positions = []
         modality_tokens = []
+        modality_pos_emb = []
+
         text = []
 
         for batch_modalities in modalities:
             batch_modality_positions = []
             batch_modality_tokens = []
+            batch_modality_pos_emb = []
             batch_text = []
             offset = 0
 
@@ -1602,7 +1614,7 @@ class Transfusion(Module):
                 # if non-text modality detected and not given as a tuple
                 # cast to (int, Tensor) where int is defaulted to type 0 (convenience for one modality)
 
-                if torch.is_tensor(modality) and modality.dtype == torch.float:
+                if is_tensor(modality) and modality.dtype == torch.float:
                     modality = (0, modality)
 
                 is_text = not isinstance(modality, tuple)
@@ -1645,6 +1657,11 @@ class Transfusion(Module):
 
                     batch_text.append(modality_tensor)
                     offset += text_length
+
+                    if need_axial_pos_emb:
+                        zeros = torch.zeros((text_length, self.dim), device = device)
+                        batch_modality_pos_emb.append(zeros)
+
                     continue
 
                 # otherwise handle a modality
@@ -1663,6 +1680,8 @@ class Transfusion(Module):
                 modality_shape_str = join([*map(str, modality_shape_tuple)], ',')
                 modality_meta_info = self.char_tokenizer(modality_shape_str, device = device)
 
+                prec_meta_tag_length = len(modality_meta_info) + 2
+
                 text_tensor = torch.cat((
                     tensor_([self.meta_id]),
                     modality_meta_info,
@@ -1680,11 +1699,38 @@ class Transfusion(Module):
 
                 offset += modality_length + 2 + len(modality_meta_info) + 1 # +2 due to [som] and [eom] - then account for meta start id and modality shape information (or eventually any meta information about modality)
 
+                # handle axial positional embedding
+
+                if need_axial_pos_emb:
+
+                    modality_pos_mlp = self.pos_emb_mlp[modality_type]
+
+                    if exists(modality_pos_mlp):
+                        one_modality_pos_emb = modality_pos_mlp(tensor(modality_shape_tuple))
+
+                        one_modality_pos_emb = F.pad(one_modality_pos_emb, (0, 0, prec_meta_tag_length, 1), value = 0.)
+
+                        pos_emb = one_modality_pos_emb
+                    else:
+                        pos_emb = torch.zeros(text_tensor.shape[0], self.dim, device = device)
+
+                    batch_modality_pos_emb.append(pos_emb)
+
             text.append(torch.cat(batch_text))
+
+            if need_axial_pos_emb:
+                modality_pos_emb.append(torch.cat(batch_modality_pos_emb, dim = -2))
+
             modality_tokens.append(batch_modality_tokens)
             modality_positions.append(batch_modality_positions)
 
         text = pad_sequence(text, padding_value = -1)
+
+        if need_axial_pos_emb:
+            modality_pos_emb = pad_sequence(modality_pos_emb, padding_value = 0.)
+
+            if return_loss:
+                modality_pos_emb = modality_pos_emb[:, :-1]
 
         # if returning loss, split text for next token prediction
 
@@ -1710,7 +1756,7 @@ class Transfusion(Module):
 
         # embed the list of modality tokens into a sequence of Float['b n d'] at right offsets and lengths as dictated by modalities info tensor
 
-        if torch.is_tensor(modality_tokens):
+        if is_tensor(modality_tokens):
             modality_tokens = [modality_tokens]
 
         # embed the modality tokens into one Tensor if not given as one
@@ -1779,6 +1825,11 @@ class Transfusion(Module):
         modality_tokens = [fn(one_modality_tokens) for fn, one_modality_tokens in zip(self.latent_to_model_projs, modality_tokens)]
 
         modality_tokens = sum(modality_tokens)
+
+        # maybe add the axial positional embedding
+
+        if need_axial_pos_emb:
+            modality_tokens = modality_tokens + modality_pos_emb
 
         # intersperse the modalities with the text for the joint transformer + flow system
 

@@ -256,3 +256,29 @@ def test_velocity_consistency():
     loss.backward()
 
     assert exists(breakdown.velocity)
+
+def test_axial_pos_emb():
+    model = Transfusion(
+        num_text_tokens = 256,
+        dim_latent = (384, 192),
+        modality_default_shape = ((4,), (2,)),
+        add_pos_emb = True,
+        modality_num_dim = 1,
+        transformer = dict(
+            dim = 512,
+            depth = 8
+        )
+    )
+
+    text_images_and_audio = [
+        [randint(0, 256, (16,)), (0, randn(4, 384)), randint(0, 256, (8,)), (1, randn(6, 192))],
+        [randint(0, 256, (16,)), randn(7, 384), randint(0, 256, (5,)), (1, randn(2, 192)), randint(0, 256, (9,))]
+    ]
+
+    loss = model(text_images_and_audio)
+
+    loss.backward()
+
+    # after much training
+
+    one_multimodal_sample = model.sample()
