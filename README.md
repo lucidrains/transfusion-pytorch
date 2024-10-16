@@ -155,6 +155,11 @@ loss.backward()
 sampled = model.generate_text_only(text[:, :1], 1024)
 ```
 
+## Todo
+
+- [ ] use N-dimensional alibi with flex attention (configure for only certain amount of heads) for relative positions for any modality
+- [ ] test out modality only training on oxford flowers
+
 ## Citations
 
 ```bibtex
