@@ -72,7 +72,7 @@ except ImportError:
 
 # constants
 
-ModalitySample = list[Int[''] | Int['_'] | Float['...'] | tuple[int, Float['_ _']]]
+ModalitySample = list[Int[''] | Int['_'] | Float['...'] | tuple[int, Float['...']]]
 
 ModalityTokenTransform = str | Callable | None
 
