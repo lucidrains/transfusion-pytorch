@@ -1467,7 +1467,7 @@ class Transfusion(Module):
         prompt_seq_len, out = prompt.shape[-1], prompt.clone()
         sample_num_times = max(0, seq_len - prompt_seq_len)
 
-        for _ in range(sample_num_times):
+        for _ in tqdm(range(sample_num_times)):
             logits = self.forward_text(out, return_loss = False)
             logits = logits[:, -1]
 

@@ -130,6 +130,31 @@ one_multimodal_sample = model.sample()
 print_modality_sample(one_multimodal_sample)
 ```
 
+To pretrain on language first, just pass in your text as type `Int['batch seq']`
+
+```python
+import torch
+from transfusion_pytorch import Transfusion
+
+model = Transfusion(
+    num_text_tokens = 256,
+    dim_latent = 384,
+    transformer = dict(
+        dim = 512,
+        depth = 8,
+    )
+).cuda()
+
+text = torch.randint(0, 256, (2, 1024)).cuda()
+
+loss = model(text)
+loss.backward()
+
+# after much training
+
+sampled = model.generate_text_only(text[:, :1], 1024)
+```
+
 ## Citations
 
 ```bibtex
