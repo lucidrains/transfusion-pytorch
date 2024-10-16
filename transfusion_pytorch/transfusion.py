@@ -72,7 +72,7 @@ except ImportError:
 
 # constants
 
-ModalitySample = list[Int['_'] | Float['...'] | tuple[int, Float['_ _']]]
+ModalitySample = list[Int[''] | Int['_'] | Float['...'] | tuple[int, Float['_ _']]]
 
 ModalityTokenTransform = str | Callable | None
 
@@ -543,7 +543,7 @@ class AdaptiveWrapper(Module):
     def forward_modality(
         self,
         x: Float['b n {self.dim}'],
-        cond: Float['b {self.dim_cond}'] | Float['b n {self.dim_cond}'],
+        cond: Float['... {self.dim_cond}'],
         **kwargs
     ):
         x = self.layernorm(x)
@@ -554,7 +554,7 @@ class AdaptiveWrapper(Module):
 
         # attention or feedforwards
 
-        out = self.fn(x, **kwargs)
+        out = self.fn(modality_tokens, **kwargs)
 
         multiple_returns = isinstance(out, tuple)
 
@@ -578,7 +578,7 @@ class AdaptiveWrapper(Module):
     def forward(
         self,
         x: Float['b n {self.dim}'],
-        cond: Float['b {self.dim_cond}'] | Float['b n {self.dim_cond}'] | None = None,
+        cond: Float['... {self.dim_cond}'] | None = None,
         is_any_modality: bool | Bool['b n'] | None = None,
         modality_only = False,
         **kwargs
@@ -1223,7 +1223,7 @@ class Transfusion(Module):
 
                 if not meta_str.isdigit() or int(meta_str) <= 0:
 
-                    assert exists(default_shape), f'invalid modality meta information detected, please set `modality_default_shape` in order to properly fallback'
+                    assert exists(default_shape), 'invalid modality meta information detected, please set `modality_default_shape` in order to properly fallback'
                     modality_shape = default_shape
                 else:
                     modality_shape = meta_str_to_modality_shape(meta_str)
@@ -1462,7 +1462,8 @@ class Transfusion(Module):
         seq_len: int,
         temperature = 1.5,
         min_p = 0.1,
-    ):
+    ) -> Int['b no']:
+
         prompt_seq_len, out = prompt.shape[-1], prompt.clone()
         sample_num_times = max(0, seq_len - prompt_seq_len)
 
@@ -1824,8 +1825,6 @@ class Transfusion(Module):
         # sort the modalities tensor and sanitize, readying for noising of modalities
 
         modality_positions, sorted_indices = order_modality_positions_by_seq_offset(modality_positions)
-
-        num_modalities = modality_positions.shape[-2]
 
         is_modalities = modality_positions_to_is_modality_mask(seq_len, modality_positions, num_modalities = self.num_modalities, device = device)
 

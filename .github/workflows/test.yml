@@ -1,6 +1,9 @@
 name: Tests the examples in README
 on: push
 
+env:
+  TYPECHECK: True
+
 jobs:
   test:
     runs-on: ubuntu-latest
