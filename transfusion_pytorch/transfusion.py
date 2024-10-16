@@ -209,6 +209,20 @@ def l2norm(t):
 def softclamp(t, value = 50.):
     return (t / value).tanh() * value
 
+def max_neg_value(t):
+    return -torch.finfo(t.dtype).max
+
+def log(t, eps = 1e-20):
+    return torch.log(t.clamp(min = eps))
+
+def gumbel_noise(t):
+    noise = torch.rand_like(t)
+    return -log(-log(noise))
+
+def gumbel_sample(t, temperature = 1., dim = -1, keepdim = True):
+    noise = gumbel_noise(t) * int(temperature > 0)
+    return (t / temperature + noise).argmax(dim = dim, keepdim = keepdim)
+
 # flex attention mask construction
 # https://pytorch.org/blog/flexattention/
 
@@ -507,7 +521,6 @@ class AdaptiveWrapper(Module):
         x: Float['b n {self.dim}'],
         **kwargs
     ):
-
         x = self.layernorm(x)
 
         x = x * (self.layernorm_gamma + 1.)
@@ -645,7 +658,6 @@ def FeedForward(
 ):
     dim_inner = int(dim * expansion_factor * 2 / 3)
     return nn.Sequential(
-        RMSNorm(dim),
         Linear(dim, dim_inner * 2),
         GEGLU(),
         nn.Dropout(dropout),
@@ -669,8 +681,6 @@ class Attention(Module):
 
         assert not (use_flex_attn and not exists(flex_attention)), 'flex attention is only available on torch 2.5.0 (nightly) onwards'
         self.use_flex_attn = use_flex_attn
-
-        self.norm = RMSNorm(dim)
 
         self.to_qkv = nn.Sequential(
             Linear(dim, dim_inner * 3, bias = False),
@@ -714,9 +724,7 @@ class Attention(Module):
         assert not (exists(block_mask) and exists(attn_mask))
         assert not (not self.use_flex_attn and exists(block_mask)), 'you cannot pass in the `block_mask` if `use_flex_attn` was not set to be `True`'
 
-        # pre rmsnorm and project to queries, keys, values
-
-        x = self.norm(x)
+        # project to queries, keys, values
 
         q, k, v = self.to_qkv(x)
 
@@ -755,7 +763,7 @@ class Attention(Module):
 
             sim = softclamp(sim, self.softcap_value)
 
-            mask_value = -torch.finfo(sim.dtype).max
+            mask_value = max_neg_value(sim)
 
             if causal:
                 i, j = sim.shape[-2:]
@@ -1125,6 +1133,9 @@ class Transfusion(Module):
 
         self.to_text_logits = Linear(dim, effective_num_text_tokens, bias = False)
 
+        text_only_mask = torch.arange(effective_num_text_tokens) < num_text_tokens
+        self.register_buffer('text_only_logits_mask', text_only_mask, persistent = False)
+
         self.model_to_latent_preds = ModuleList([Linear(dim, dim_latent, bias = False) for dim_latent in self.dim_latents])
 
         # loss related
@@ -1397,7 +1408,8 @@ class Transfusion(Module):
         device = self.device
         text = text.to(device)
 
-        text, labels = text[:, :-1], text[:, 1:]
+        if return_loss:
+            text, labels = text[:, :-1], text[:, 1:]
 
         # embed text
 
@@ -1431,6 +1443,8 @@ class Transfusion(Module):
 
             return logits, kv_cache
 
+        logits = logits.masked_fill(~self.text_only_logits_mask, max_neg_value(logits))
+
         loss = F.cross_entropy(
             rearrange(logits, 'b n l -> b l n'),
             labels,
@@ -1438,6 +1452,33 @@ class Transfusion(Module):
         )
 
         return loss
+
+    @torch.no_grad()
+    @eval_decorator
+    @typecheck
+    def generate_text_only(
+        self,
+        prompt: Int['b n'],
+        seq_len: int,
+        temperature = 1.5,
+        min_p = 0.1,
+    ):
+        prompt_seq_len, out = prompt.shape[-1], prompt.clone()
+        sample_num_times = max(0, seq_len - prompt_seq_len)
+
+        for _ in range(sample_num_times):
+            logits = self.forward_text(out, return_loss = False)
+            logits = logits[:, -1]
+
+            logits = min_p_filter(logits, min_p = min_p)
+
+            logits.masked_fill_(~self.text_only_logits_mask, max_neg_value(logits))
+
+            sample = gumbel_sample(logits, temperature = temperature, dim = -1)
+
+            out = torch.cat((out, sample), dim = -1)
+
+        return out[..., prompt_seq_len:]
 
     @typecheck
     def forward_modality(
