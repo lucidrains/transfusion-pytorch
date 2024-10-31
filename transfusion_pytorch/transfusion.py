@@ -24,7 +24,7 @@ from torch import nn, Tensor, tensor, is_tensor
 import torch.nn.functional as F
 from torch.nn import Module, ModuleList, Linear
 from torch.nn.utils.rnn import pad_sequence
-from torch.utils._pytree import tree_map
+from torch.utils._pytree import tree_map, tree_flatten, tree_unflatten
 
 from torchdiffeq import odeint
 
@@ -527,15 +527,11 @@ class AdaptiveWrapper(Module):
 
         out = self.fn(x, **kwargs)
 
-        multiple_returns = isinstance(out, tuple)
-
-        if multiple_returns:
-            out, *rest = out
+        (out, *rest), tree_spec = tree_flatten(out)
 
         out = out * (self.layerscale + 1.)
 
-        if multiple_returns:
-            out = (out, *rest)
+        out = tree_unflatten((out, *rest), tree_spec)
 
         return out
 
@@ -556,21 +552,15 @@ class AdaptiveWrapper(Module):
 
         out = self.fn(modality_tokens, **kwargs)
 
-        multiple_returns = isinstance(out, tuple)
-
-        if multiple_returns:
-            out, *rest = out
+        (out, *rest), tree_spec = tree_flatten(out)
 
         # take care of conditioning output separately for text vs modality
 
         modalities_out = out * self.to_ada_ln_zero(cond).sigmoid()
 
-        # take care of function returning cache
+        # take care of function returning cache or value residual
 
-        if not multiple_returns:
-            return modalities_out
-
-        return (modalities_out, *rest)
+        modalities_out = tree_unflatten((modalities_out, *rest), tree_spec)
 
         return modalities_out
 
@@ -615,10 +605,7 @@ class AdaptiveWrapper(Module):
 
         out = self.fn(x, **kwargs)
 
-        multiple_returns = isinstance(out, tuple)
-
-        if multiple_returns:
-            out, *rest = out
+        (out, *rest), tree_spec = tree_flatten(out)
 
         # take care of conditioning output separately for text vs modality
 
@@ -628,12 +615,11 @@ class AdaptiveWrapper(Module):
 
         conditioned_out = torch.where(is_any_modality, modalities_out, text_out)
 
-        # take care of function returning cache
+        # take care of function returning cache or value residual
 
-        if not multiple_returns:
-            return conditioned_out
+        conditioned_out = tree_unflatten((conditioned_out, *rest), tree_spec)
 
-        return (conditioned_out, *rest)
+        return conditioned_out
 
 # attention
 
@@ -709,7 +695,9 @@ class Attention(Module):
         cache: Tensor | None = None,
         causal = False,
         block_mask = None, # only passed in for flex attention
-        return_kv_cache = False
+        return_kv_cache = False,
+        return_values = False,
+        value_residual: Tensor | None = None
     ):
         device, input_is_cuda, is_decoding_with_cache = x.device, x.is_cuda, exists(cache)
 
@@ -727,6 +715,13 @@ class Attention(Module):
         # project to queries, keys, values
 
         q, k, v = self.to_qkv(x)
+
+        # value residual
+
+        orig_v = v
+
+        if exists(value_residual):
+            v = 0.5 * (v + value_residual)
 
         # handle cache being passed in
 
@@ -787,6 +782,9 @@ class Attention(Module):
         # combine heads and out
 
         out = self.to_out(out)
+
+        if return_values:
+            out = (out, orig_v)
 
         if not return_kv_cache:
             return out
@@ -927,6 +925,8 @@ class Transformer(Module):
         # transformer layers as usual, using mask from above
 
         skips = []
+        value_residual = None
+
         new_cache = []
 
         depth = len(self.layers)
@@ -951,14 +951,18 @@ class Transformer(Module):
 
             # attention and feedforward
 
-            attn_out, kv_cache = attn(
+            (attn_out, attn_values), kv_cache = attn(
                 x,
                 rotary_emb = rotary_emb,
                 cache = next(iter_cache, None),
                 return_kv_cache = True,
+                return_values = True,
+                value_residual = value_residual,
                 **attn_mask_kwargs,
                 **adaptive_kwargs
             )
+
+            value_residual = default(value_residual, attn_values)
 
             new_cache.append(kv_cache)
 
