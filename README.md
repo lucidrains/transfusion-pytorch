@@ -159,6 +159,7 @@ sampled = model.generate_text_only(text[:, :1], 1024)
 
 - [ ] use N-dimensional alibi with flex attention (configure for only certain amount of heads) for relative positions for any modality
 - [ ] test out modality only training on oxford flowers
+- [ ] given findings in pi-zero robotics foundation model, add mixture of experts for both attention and feedforward as options
 
 ## Citations
 
