@@ -32,6 +32,8 @@ import einx
 from einops import rearrange, repeat, reduce, einsum, pack
 from einops.layers.torch import Rearrange
 
+from loguru import logger
+
 from ema_pytorch import EMA
 
 from rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
@@ -1290,6 +1292,7 @@ class Transfusion(Module):
                     sampled_token_id = sampled.item()
 
                     if sampled_token_id == self.eos_id:
+                        logger.info(f'detecting an end of string token [{self.eos_id}], terminating sampling early')
                         break
 
                     maybe_transition_to_modality_decoding(seq)
