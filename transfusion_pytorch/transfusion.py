@@ -2014,7 +2014,9 @@ class Transfusion(Module):
             modality_loss_weights.append(modality_loss_weight)
 
             flow_losses.append(flow_loss)
-            direction_losses.append(direction_loss)
+
+            if self.add_flow_direction_loss:
+                direction_losses.append(direction_loss)
 
         modality_loss_weights = torch.stack(modality_loss_weights)
 
