@@ -18,9 +18,11 @@ from transfusion_pytorch.transfusion import (
 
 @pytest.mark.parametrize('cache_kv', (False, True))
 @pytest.mark.parametrize('use_flex_attn', (False, True))
+@pytest.mark.parametrize('add_direction_loss', (False, True))
 def test_transfusion(
     cache_kv: bool,
-    use_flex_attn: bool
+    use_flex_attn: bool,
+    add_direction_loss: bool
 ):
 
     if use_flex_attn and (not exists(flex_attention) or not cuda_available):
@@ -33,6 +35,7 @@ def test_transfusion(
         num_text_tokens = text_tokens,
         dim_latent = (384, 192), # specify multiple latent dimensions
         modality_default_shape = ((32,), (64,)),
+        add_flow_direction_loss = add_direction_loss,
         transformer = dict(
             dim = 512,
             depth = 2,

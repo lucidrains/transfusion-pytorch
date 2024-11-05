@@ -85,6 +85,7 @@ class LossBreakdown(NamedTuple):
     text: Float['']
     flow: list[Float['']]
     velocity: list[Float['']] | None
+    direction: list[Float['']] | None
 
 # helper functions
 
@@ -260,6 +261,11 @@ def softcap_score_mod(softcap):
         score = score * softcap
         return score
     return inner
+
+# losses
+
+def calc_direction_loss(pred, target):
+    return 0.5 * (1. - einsum(l2norm(pred), l2norm(target), '... d, ... d -> ...'))
 
 # converting a raw list of modality offsets and lengths to tensor
 
@@ -1001,6 +1007,8 @@ class Transfusion(Module):
         to_modality_shape_fn: Callable | tuple[Callable, ...] = default_to_modality_shape_fn,
         ignore_index = -1,
         flow_loss_weight = 1.,
+        add_flow_direction_loss = True, # figure 7 https://arxiv.org/abs/2410.10356
+        direction_loss_weight = 1.,
         velocity_consistency_loss_weight = 1.,
         odeint_kwargs: dict = dict(
             atol = 1e-5,
@@ -1152,6 +1160,11 @@ class Transfusion(Module):
         # velocity consistency weight - only added if EMA model is passed in during training
 
         self.velocity_consistency_loss_weight = velocity_consistency_loss_weight
+
+        # flow direction loss related
+
+        self.add_flow_direction_loss = add_flow_direction_loss
+        self.direction_loss_weight = direction_loss_weight
 
         # flow sampling related
 
@@ -1976,6 +1989,8 @@ class Transfusion(Module):
         # calculate flow losses
 
         flow_losses = []
+        direction_losses = []
+
         modality_loss_weights = []
 
         for flow, pred_flow, is_one_modality in zip(flows, pred_flows, is_modalities.unbind(dim = 1)):
@@ -1990,11 +2005,16 @@ class Transfusion(Module):
 
             flow_loss = flow_loss[is_one_modality].mean()
 
+            if self.add_flow_direction_loss:
+                direction_loss = calc_direction_loss(pred_flow, flow)
+                direction_loss = direction_loss[is_one_modality].mean()
+
             modality_loss_weight = is_one_modality.sum() / total_tokens
 
             modality_loss_weights.append(modality_loss_weight)
 
             flow_losses.append(flow_loss)
+            direction_losses.append(direction_loss)
 
         modality_loss_weights = torch.stack(modality_loss_weights)
 
@@ -2004,6 +2024,14 @@ class Transfusion(Module):
             text_loss * text_loss_weight +
             (torch.stack(flow_losses) * modality_loss_weights).sum() * self.flow_loss_weight
         )
+
+        # maybe add direction loss
+
+        if self.add_flow_direction_loss:
+            total_loss = (
+                total_loss +
+                (torch.stack(direction_losses) * modality_loss_weights).sum() * self.direction_loss_weight
+            )
 
         # whether to handle velocity consistency
         # for straightening the flow, from consistency flow matching paper https://arxiv.org/abs/2407.02398
@@ -2047,4 +2075,4 @@ class Transfusion(Module):
         if not return_breakdown:
             return total_loss
 
-        return total_loss, LossBreakdown(total_loss, text_loss, flow_losses, velocity_match_losses)
+        return total_loss, LossBreakdown(total_loss, text_loss, flow_losses, velocity_match_losses, direction_losses)
