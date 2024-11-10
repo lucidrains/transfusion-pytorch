@@ -1775,7 +1775,7 @@ class Transfusion(Module):
 
                 batch_modality_tokens.append(modality_tensor)
 
-                batch_modality_positions.append((modality_type, offset + prec_meta_tag_length, modality_length)) # offset + 1 due to extra [som] token
+                batch_modality_positions.append((modality_type, offset + prec_meta_tag_length, modality_length)) # offset + preceding meta tag length (which includes the modality start token)
 
                 offset += modality_length + 2 + len(modality_meta_info) + 1 # +2 due to [som] and [eom] - then account for meta start id and modality shape information (or eventually any meta information about modality)
 
