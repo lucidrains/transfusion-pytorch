@@ -146,11 +146,11 @@ def default_modality_length_to_time_fn(modality_length: Int['b m']) -> Float['b 
     rand_num_modalities = torch.floor(torch.rand_like(num_modalities) * num_modalities)
     seq = torch.arange(total_modalities, device = device)
 
-    prev_decoded_modality = einx.less_equal('n, b -> b n', seq, rand_num_modalities)
+    prev_decoded_modality = einx.less('m, b -> b m', seq, rand_num_modalities)
     curr_modality_rand_time = torch.rand_like(num_modalities)
 
     # in paper, they fix previous decoded modalities to 500 / 1000 steps for discrete ddpm, here using flow matching with times 0 - 1 so corresponds to 0.5
-    return torch.where(prev_decoded_modality, 0.5, curr_modality_rand_time)
+    return einx.where('b m, , b -> b m', prev_decoded_modality, 0.5, curr_modality_rand_time)
 
 # pretty print
 
