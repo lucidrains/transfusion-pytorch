@@ -101,9 +101,6 @@ def identity(t):
 def first(it):
     return it[0]
 
-def prepend(arr, el):
-    arr.insert(0, el)
-
 def join(arr, delimiter = ''):
     return delimiter.join(arr)
 
@@ -1667,9 +1664,14 @@ class Transfusion(Module):
         # add "sentence" start and end tokens when training
 
         if return_loss or need_velocity_matching:
-            for modality in modalities:
-                prepend(modality, tensor_([self.sos_id]))
-                modality.append(tensor_([self.eos_id]))
+            modalities = modalities.copy()
+
+            for i, modality in enumerate(modalities):
+                modalities[i] = [
+                    tensor_([self.sos_id]),
+                    *modality,
+                    tensor_([self.eos_id])
+                ]
 
         # need axial pos emb
 
