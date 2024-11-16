@@ -81,7 +81,7 @@ optimizer = Adam(model.parameters(), lr = 3e-4)
 
 # train loop
 
-for step in range(1, 10_000 + 1):
+for step in range(1, 100_000 + 1):
 
     loss = model(next(iter_dl))
     loss.backward()
@@ -90,3 +90,11 @@ for step in range(1, 10_000 + 1):
     optimizer.zero_grad()
 
     print(f'{step}: {loss.item():.3f}')
+
+    if divisible_by(step, 250):
+        image = model.generate_modality_only(batch_size = 16)
+
+        save_image(
+            rearrange(image, '(gh gw) 1 h w -> 1 (gh h) (gw w)', gh = 4).detach().cpu(),
+            str(results_folder / f'{step}.png')
+        )

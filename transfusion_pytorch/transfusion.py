@@ -1502,7 +1502,9 @@ class Transfusion(Module):
     def forward_modality(
         self,
         modalities: Float['b ...'],
+        times: Float['b'] | None = None,
         modality_type: int | None = None,
+        encode_modality: bool = True,
         return_loss = True
     ) -> Float['']:
 
@@ -1526,7 +1528,7 @@ class Transfusion(Module):
 
         # maybe modality encode
 
-        if exists(maybe_modality_encode):
+        if encode_modality and exists(maybe_modality_encode):
             with torch.no_grad():
                 maybe_modality_encode.eval()
                 modalities = maybe_modality_encode(modalities).detach()
@@ -1566,7 +1568,9 @@ class Transfusion(Module):
 
         # times
 
-        times = torch.rand((batch,), device = device)
+        if not exists(times):
+            times = torch.rand((batch,), device = device)
+
         padded_times = rearrange(times, 'b -> b 1 1')
 
         noise = torch.randn_like(tokens)
@@ -1600,6 +1604,76 @@ class Transfusion(Module):
         # flow loss
 
         return F.mse_loss(pred_flow, flow)
+
+    @torch.no_grad()
+    @eval_decorator
+    @typecheck
+    def generate_modality_only(
+        self,
+        batch_size: int = 1,
+        modality_type: int | None = None,
+        fixed_modality_shape: tuple[int, ...] | None = None,
+        modality_steps = 16,
+        return_unprocessed_modalities = False
+    ) -> Tensor:
+
+        device = self.device
+
+        if self.num_modalities > 1:
+            assert exists(modality_type), '`modality_type` must be explicitly passed in on forward when training on greater than 1 modality'
+
+        modality_type = default(modality_type, 0)
+
+        latent_dim = self.dim_latents[modality_type]
+        to_flow_pred = self.model_to_latent_preds[modality_type]
+        maybe_modality_decoder = self.modality_decoder[modality_type]
+        maybe_modality_decoder = self.modality_decoder[modality_type]
+        default_modality_shape = self.modality_default_shape[modality_type]
+
+        modality_shape = default(fixed_modality_shape, default_modality_shape)
+
+        assert exists(modality_shape)
+
+        axial_dims = modality_shape
+        modality_length = math.prod(modality_shape)
+
+        noise = torch.randn((batch_size, modality_length, latent_dim), device = device)
+
+        def ode_step_fn(step_times, denoised):
+
+            step_times = repeat(step_times, ' -> b', b = batch_size)
+
+            denoised = denoised.reshape(batch_size, *modality_shape, latent_dim)
+
+            flow = self.forward_modality(
+                denoised,
+                times = step_times,
+                encode_modality = False,
+                return_loss = False
+            )
+
+            return flow
+
+        times = torch.linspace(0., 1., modality_steps, device = device)
+        trajectory = self.odeint_fn(ode_step_fn, noise, times)
+
+        # add the sampled modality tokens
+
+        sampled_modality = trajectory[-1]
+
+        # reshape
+
+        sampled_modality = sampled_modality.reshape(batch_size, *modality_shape, latent_dim)
+
+        # decode
+
+        if self.channel_first_latent:
+            sampled_modality = rearrange(sampled_modality, 'b ... d -> b d ...')
+
+        if exists(maybe_modality_decoder):
+            sampled_modality = maybe_modality_decoder(sampled_modality)
+
+        return sampled_modality
 
     @typecheck
     def forward(
