@@ -1552,9 +1552,14 @@ class Transfusion(Module):
 
             assert len(axial_dims) == modality_num_dim, f'received modalities of ndim {len(axial_dims)} but expected {modality_num_dim}'
 
-        # rotary
+        # shapes and device
 
         batch, device = tokens.shape[0], tokens.device
+
+        # maybe channel first
+
+        if self.channel_first_latent:
+            tokens = rearrange(tokens, 'b d ... -> b ... d')
 
         # times
 
@@ -1569,16 +1574,13 @@ class Transfusion(Module):
 
         flow = tokens - noise
 
+        # from latent to model tokens
+
         noised_tokens = latent_to_model_fn(noised_tokens)
 
         # maybe transform
 
         noised_tokens = transform(noised_tokens)
-
-        # maybe channel first
-
-        if self.channel_first_latent:
-            noised_tokens = rearrange(noised_tokens, 'b d ... -> b ... d')
 
         noised_tokens = rearrange(noised_tokens, 'b ... d -> b (...) d')
 
