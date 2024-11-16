@@ -1506,7 +1506,7 @@ class Transfusion(Module):
         return_loss = True
     ) -> Float['']:
 
-        shape = modalities.shape
+        modalities = modalities.to(self.device)
 
         if self.num_modalities > 1:
             assert exists(modality_type), '`modality_type` must be explicitly passed in on forward when training on greater than 1 modality'
@@ -1514,6 +1514,7 @@ class Transfusion(Module):
         modality_type = default(modality_type, 0)
 
         transform = self.modality_token_transform[modality_type]
+        maybe_modality_encode = self.modality_encoder[modality_type]
         latent_to_model_fn = self.latent_to_model_projs[modality_type]
         model_to_flow_pred_fn = self.model_to_latent_preds[modality_type]
 
@@ -1522,6 +1523,17 @@ class Transfusion(Module):
         add_pos_emb = self.add_pos_emb[modality_type]
         maybe_pos_emb_mlp = self.pos_emb_mlp[modality_type]
         modality_num_dim = self.modality_num_dim[modality_type]
+
+        # maybe modality encode
+
+        if exists(maybe_modality_encode):
+            with torch.no_grad():
+                maybe_modality_encode.eval()
+                modalities = maybe_modality_encode(modalities).detach()
+
+        shape = modalities.shape
+
+        # axial positions
 
         if add_pos_emb:
             assert exists(modality_num_dim), f'modality_num_dim must be set for modality {modality_type} if further injecting axial positional embedding'
@@ -1569,7 +1581,6 @@ class Transfusion(Module):
 
         if add_pos_emb:
             axial_pos_emb = maybe_pos_emb_mlp(tensor(axial_dims), flatten_dims = True)
-
             noised_tokens = noised_tokens + axial_pos_emb
 
         # attention
