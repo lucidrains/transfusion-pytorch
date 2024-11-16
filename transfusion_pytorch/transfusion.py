@@ -212,6 +212,9 @@ def softclamp(t, value = 50.):
 def max_neg_value(t):
     return -torch.finfo(t.dtype).max
 
+def append_dims(t, ndims):
+    return t.reshape(*t.shape, *((1,) * ndims))
+
 def log(t, eps = 1e-20):
     return torch.log(t.clamp(min = eps))
 
@@ -1535,6 +1538,8 @@ class Transfusion(Module):
 
         shape = modalities.shape
 
+        tokens = modalities
+
         # axial positions
 
         if add_pos_emb:
@@ -1547,27 +1552,16 @@ class Transfusion(Module):
 
             assert len(axial_dims) == modality_num_dim, f'received modalities of ndim {len(axial_dims)} but expected {modality_num_dim}'
 
-        # maybe transform
-
-        tokens = transform(modalities)
-
-        # maybe channel first
-
-        if self.channel_first_latent:
-            tokens = rearrange(tokens, 'b d ... -> b ... d')
-
-        tokens = rearrange(tokens, 'b ... d -> b (...) d')
-
         # rotary
 
-        batch, seq_len, device = tokens.shape[0], tokens.shape[-2], tokens.device
+        batch, device = tokens.shape[0], tokens.device
 
         # times
 
         if not exists(times):
             times = torch.rand((batch,), device = device)
 
-        padded_times = rearrange(times, 'b -> b 1 1')
+        padded_times = append_dims(times, tokens.ndim - 1)
 
         noise = torch.randn_like(tokens)
 
@@ -1576,6 +1570,19 @@ class Transfusion(Module):
         flow = tokens - noise
 
         noised_tokens = latent_to_model_fn(noised_tokens)
+
+        # maybe transform
+
+        noised_tokens = transform(noised_tokens)
+
+        # maybe channel first
+
+        if self.channel_first_latent:
+            noised_tokens = rearrange(noised_tokens, 'b d ... -> b ... d')
+
+        noised_tokens = rearrange(noised_tokens, 'b ... d -> b (...) d')
+
+        seq_len = noised_tokens.shape[-2]
 
         # maybe add axial pos emb
 
@@ -1597,6 +1604,8 @@ class Transfusion(Module):
             return pred_flow
 
         # flow loss
+
+        flow = rearrange(flow, 'b ... d -> b (...) d')
 
         return F.mse_loss(pred_flow, flow)
 
