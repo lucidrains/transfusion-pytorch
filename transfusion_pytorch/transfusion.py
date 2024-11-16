@@ -1509,7 +1509,7 @@ class Transfusion(Module):
         modality_type: int | None = None,
         encode_modality: bool = True,
         return_loss = True
-    ) -> Float['']:
+    ) -> Float[''] | Float['b ...']:
 
         modalities = modalities.to(self.device)
 
