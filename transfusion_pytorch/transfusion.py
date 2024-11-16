@@ -1004,7 +1004,7 @@ class Transfusion(Module):
         to_modality_shape_fn: Callable | tuple[Callable, ...] = default_to_modality_shape_fn,
         ignore_index = -1,
         flow_loss_weight = 1.,
-        add_flow_direction_loss = True, # figure 7 https://arxiv.org/abs/2410.10356
+        add_flow_direction_loss = False, # figure 7 https://arxiv.org/abs/2410.10356
         direction_loss_weight = 1.,
         velocity_consistency_loss_weight = 1.,
         odeint_kwargs: dict = dict(
@@ -1222,7 +1222,6 @@ class Transfusion(Module):
 
             if exists(fixed_modality_shape):
                 modality_shape = fixed_modality_shape
-                return
 
             # get the tokens after the modality meta id
 
@@ -1396,6 +1395,7 @@ class Transfusion(Module):
                 continue
 
             modality_id, modality = sample
+
             maybe_modality_decoder = self.modality_decoder[modality_id]
 
             if self.channel_first_latent:
@@ -1804,6 +1804,9 @@ class Transfusion(Module):
             modality_tokens.append(batch_modality_tokens)
             modality_positions.append(batch_modality_positions)
 
+        if return_loss:
+            total_tokens = sum([t.numel() for t in text])
+
         text = pad_sequence(text, padding_value = -1)
 
         if need_axial_pos_emb:
@@ -1971,10 +1974,6 @@ class Transfusion(Module):
 
         if return_only_pred_flows:
             return pred_flows
-
-        # calculate total tokens for weighing the loss
-
-        total_tokens = (text_labels != self.ignore_index).sum()
 
         # text autoregressive loss
 

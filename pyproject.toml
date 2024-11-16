@@ -1,6 +1,6 @@
 [project]
 name = "transfusion-pytorch"
-version = "0.3.7"
+version = "0.3.8"
 description = "Transfusion in Pytorch"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }
@@ -45,7 +45,10 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project.optional-dependencies]
-examples = []
+
+examples = [
+    "datasets",
+]
 test = [
     "pytest",
 ]
