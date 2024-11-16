@@ -50,6 +50,8 @@ for step in range(1, 10_000 + 1):
     loss = model(next(iter_dl))
     loss.backward()
 
+    torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+
     optimizer.step()
     optimizer.zero_grad()
 

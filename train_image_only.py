@@ -45,10 +45,10 @@ model = Transfusion(
     add_pos_emb = True,
     modality_num_dim = 2,
     transformer = dict(
-        dim = 32,
-        depth = 2,
-        dim_head = 8,
-        heads = 4
+        dim = 64,
+        depth = 4,
+        dim_head = 32,
+        heads = 8
     )
 ).cuda()
 
@@ -74,10 +74,10 @@ def cycle(iter_dl):
 
 dataset = MnistDataset()
 
-dataloader = DataLoader(dataset, batch_size = 16, shuffle = True)
+dataloader = DataLoader(dataset, batch_size = 32, shuffle = True)
 iter_dl = cycle(dataloader)
 
-optimizer = Adam(model.parameters(), lr = 3e-4)
+optimizer = Adam(model.parameters(), lr = 8e-4)
 
 # train loop
 
@@ -86,15 +86,17 @@ for step in range(1, 100_000 + 1):
     loss = model(next(iter_dl))
     loss.backward()
 
+    torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+
     optimizer.step()
     optimizer.zero_grad()
 
     print(f'{step}: {loss.item():.3f}')
 
-    if divisible_by(step, 250):
-        image = model.generate_modality_only(batch_size = 16)
+    if divisible_by(step, 500):
+        image = model.generate_modality_only(batch_size = 64)
 
         save_image(
-            rearrange(image, '(gh gw) 1 h w -> 1 (gh h) (gw w)', gh = 4).detach().cpu(),
+            rearrange(image, '(gh gw) 1 h w -> 1 (gh h) (gw w)', gh = 8).detach().cpu(),
             str(results_folder / f'{step}.png')
         )

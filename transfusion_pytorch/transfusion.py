@@ -1562,10 +1562,6 @@ class Transfusion(Module):
 
         batch, seq_len, device = tokens.shape[0], tokens.shape[-2], tokens.device
 
-        pos = torch.arange(seq_len, device = device)
-
-        rotary_emb = self.rotary_emb(pos)
-
         # times
 
         if not exists(times):
@@ -1592,7 +1588,6 @@ class Transfusion(Module):
         embed = self.transformer(
             noised_tokens,
             times = times,
-            rotary_emb = rotary_emb,
             modality_only = True,
         )
 
