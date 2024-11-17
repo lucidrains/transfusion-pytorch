@@ -1,4 +1,4 @@
-data/
+data/mnist/
 results/
 
 # Byte-compiled / optimized / DLL files
