@@ -55,7 +55,7 @@ model = Transfusion(
 class MnistDataset(Dataset):
     def __init__(self):
         self.mnist = torchvision.datasets.MNIST(
-            './data',
+            './data/mnist',
             download = True
         )
 
