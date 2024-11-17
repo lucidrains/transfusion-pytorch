@@ -161,6 +161,7 @@ sampled = model.generate_text_only(text[:, :1], 1024)
 - [ ] test out modality only training on oxford flowers
 - [ ] given findings in pi-zero robotics foundation model, add mixture of experts for both attention and feedforward as options
 - [ ] able to turn off meta information and use fixed shape per modality
+- [ ] make kv caching work during sampling and add tests
 
 ## Citations
 
