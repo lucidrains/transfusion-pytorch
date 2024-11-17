@@ -28,27 +28,27 @@ def divisible_by(num, den):
 
 class Encoder(Module):
     def forward(self, x):
-        x = rearrange(x, '1 (h p1) (w p2) -> (h w) (p1 p2)', p1 = 2, p2 = 2)
+        x = rearrange(x, '1 (h p1) (w p2) -> h w (p1 p2)', p1 = 2, p2 = 2)
         return x * 2 - 1
 
 class Decoder(Module):
     def forward(self, x):
-        x = rearrange(x, '(h w) (p1 p2) -> 1 (h p1) (w p2)', p1 = 2, p2 = 2, h = 14)
+        x = rearrange(x, 'h w (p1 p2) -> 1 (h p1) (w p2)', p1 = 2, p2 = 2, h = 14)
         return ((x + 1) * 0.5).clamp(min = 0., max = 1.)
 
 model = Transfusion(
     num_text_tokens = 10,
     dim_latent = 4,
-    modality_default_shape = (196,),
+    modality_default_shape = (14, 14),
     modality_encoder = Encoder(),
     modality_decoder = Decoder(),
     add_pos_emb = True,
-    modality_num_dim = 1,
+    modality_num_dim = 2,
     transformer = dict(
-        dim = 32,
-        depth = 2,
-        dim_head = 8,
-        heads = 4
+        dim = 64,
+        depth = 4,
+        dim_head = 32,
+        heads = 8
     )
 ).cuda()
 
@@ -86,9 +86,12 @@ optimizer = Adam(model.parameters(), lr = 3e-4)
 # train loop
 
 for step in range(1, 10_000 + 1):
+    model.train()
 
     loss = model(next(iter_dl))
     loss.backward()
+
+    torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
 
     optimizer.step()
     optimizer.zero_grad()
@@ -97,8 +100,8 @@ for step in range(1, 10_000 + 1):
 
     # eval
 
-    if divisible_by(step, 250):
-        one_multimodal_sample = model.sample(max_length = 10, fixed_modality_shape = (196,))
+    if divisible_by(step, 500):
+        one_multimodal_sample = model.sample(max_length = 10, fixed_modality_shape = (14, 14))
 
         print_modality_sample(one_multimodal_sample)
 

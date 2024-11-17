@@ -1007,6 +1007,7 @@ class Transfusion(Module):
         to_modality_shape_fn: Callable | tuple[Callable, ...] = default_to_modality_shape_fn,
         ignore_index = -1,
         flow_loss_weight = 1.,
+        text_loss_weight = 1.,
         add_flow_direction_loss = False, # figure 7 https://arxiv.org/abs/2410.10356
         direction_loss_weight = 1.,
         velocity_consistency_loss_weight = 1.,
@@ -1156,6 +1157,7 @@ class Transfusion(Module):
 
         self.ignore_index = ignore_index
         self.flow_loss_weight = flow_loss_weight
+        self.text_loss_weight = text_loss_weight
 
         # velocity consistency weight - only added if EMA model is passed in during training
 
@@ -1844,33 +1846,39 @@ class Transfusion(Module):
 
                 text_tensor = torch.full((modality_length,), -1, device = device) # text is all -1 here, so text labels are not learned on
 
-                # add the [som] and [eom] tokens for the modality type
+                # only add modality meta information when not returning embedding, which only occurs when sampling modality
 
-                som_id, eom_id = self.som_ids[modality_type], self.eom_ids[modality_type]
+                succeed_modality_tokens = precede_modality_tokens = 0
 
-                # start by just storing the token length of the modality
+                if not return_embed:
+                    # add the [som] and [eom] tokens for the modality type
 
-                modality_shape_str = join([*map(str, modality_shape_tuple)], ',')
-                modality_meta_info = self.char_tokenizer(modality_shape_str, device = device)
+                    som_id, eom_id = self.som_ids[modality_type], self.eom_ids[modality_type]
 
-                prec_meta_tag_length = len(modality_meta_info) + 2
+                    # start by just storing the token length of the modality
 
-                text_tensor = torch.cat((
-                    tensor_([self.meta_id]),
-                    modality_meta_info,
-                    tensor_([som_id]),
-                    text_tensor,
-                    tensor_([eom_id])
-                ))
+                    modality_shape_str = join([*map(str, modality_shape_tuple)], ',')
+                    modality_meta_info = self.char_tokenizer(modality_shape_str, device = device)
 
-                batch_text.append(text_tensor)
+                    precede_modality_tokens = len(modality_meta_info) + 2
+                    succeed_modality_tokens = 1
+
+                    text_tensor = torch.cat((
+                        tensor_([self.meta_id]),
+                        modality_meta_info,
+                        tensor_([som_id]),
+                        text_tensor,
+                        tensor_([eom_id])
+                    ))
+
+                batch_modality_positions.append((modality_type, offset + precede_modality_tokens, modality_length)) # offset + preceding meta tag length (which includes the modality start token)
+
+                offset += modality_length + precede_modality_tokens + succeed_modality_tokens # +2 due to [som] and [eom] - then account for meta start id and modality shape information (or eventually any meta information about modality)
+
                 modality_tensor = rearrange(modality_tensor, '... d -> (...) d')
 
                 batch_modality_tokens.append(modality_tensor)
-
-                batch_modality_positions.append((modality_type, offset + prec_meta_tag_length, modality_length)) # offset + preceding meta tag length (which includes the modality start token)
-
-                offset += modality_length + 2 + len(modality_meta_info) + 1 # +2 due to [som] and [eom] - then account for meta start id and modality shape information (or eventually any meta information about modality)
+                batch_text.append(text_tensor)
 
                 # handle axial positional embedding
 
@@ -1881,7 +1889,7 @@ class Transfusion(Module):
                     if exists(modality_pos_mlp):
                         pos_emb = modality_pos_mlp(tensor(modality_shape_tuple), flatten_dims= True)
 
-                        pos_emb = F.pad(pos_emb, (0, 0, prec_meta_tag_length, 1), value = 0.)
+                        pos_emb = F.pad(pos_emb, (0, 0, precede_modality_tokens, succeed_modality_tokens), value = 0.)
                     else:
                         pos_emb = torch.zeros(text_tensor.shape[0], self.dim, device = device)
 
@@ -2115,7 +2123,7 @@ class Transfusion(Module):
         # only the token positions that are not modalities have autoregressive loss
 
         total_loss = (
-            text_loss * text_loss_weight +
+            text_loss * text_loss_weight * self.text_loss_weight +
             (torch.stack(flow_losses) * modality_loss_weights).sum() * self.flow_loss_weight
         )
 
