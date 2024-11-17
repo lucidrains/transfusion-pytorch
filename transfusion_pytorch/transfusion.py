@@ -856,6 +856,7 @@ class Transformer(Module):
         is_any_modality: bool | Bool['b n'] | None = None,
         rotary_emb: Tensor | None = None,
         cache: Tensor | None = None,
+        decode_length: int | None = None,
         modality_only = False,
         causal_mask = False,
         return_kv_cache = False
@@ -909,13 +910,15 @@ class Transformer(Module):
         # handle kv caching
 
         if is_decoding_with_cache:
+            assert exists(decode_length)
+
             cache_length = first(cache).shape[-2]
 
-            x = x[..., cache_length:, :]
-            cond = cond[..., cache_length:, :]
+            x = x[..., -decode_length:, :]
+            cond = cond[..., -decode_length:, :]
 
             if is_tensor(is_any_modality):
-                is_any_modality = is_any_modality[..., cache_length:]
+                is_any_modality = is_any_modality[..., -decode_length:]
 
         # adaptive layernorm kwargs, which handles text and modality tokens differently
 
@@ -1280,6 +1283,7 @@ class Transfusion(Module):
                         [modality_sample],
                         return_loss = False,
                         cache = cache,
+                        decode_length = 1,
                         decoding_text_or_modality = 'text',
                         return_kv_cache = True
                     )
@@ -1344,6 +1348,7 @@ class Transfusion(Module):
                             times = step_times,
                             return_embed = True,
                             cache = cache,
+                            decode_length = modality_length,
                             return_kv_cache = True,
                             decoding_text_or_modality = 'modality'
                         )
@@ -1695,6 +1700,7 @@ class Transfusion(Module):
         modality_length_to_times_fn: Callable[[Int['b m']], Float['b m']] | None = None, # allows a researcher to customize the times (noise level) based on the modality lengths in a given sample 
         modality_type: int | None = None,
         cache: Tensor | None = None,
+        decode_length: int | None = None,
         decoding_text_or_modality: Literal['text', 'modality'] | None = None,
         velocity_consistency_ema_model: Transfusion | EMA | None = None,
         velocity_consistency_delta_time = 1e-3,
@@ -2027,7 +2033,12 @@ class Transfusion(Module):
         is_any_modality_when_decoding = None
 
         if exists(cache):
+            assert exists(decode_length), '`decode_length` must be passed in on forward for modality sampling. think of a cleaner way on some future date'
             assert exists(decoding_text_or_modality)
+
+            if decoding_text_or_modality == 'text':
+                decode_length = 1
+
             is_any_modality_when_decoding = decoding_text_or_modality == 'modality'
             modality_positions = None
 
@@ -2044,6 +2055,7 @@ class Transfusion(Module):
             modality_positions = modality_positions,
             is_any_modality = is_any_modality_when_decoding,
             cache = cache,
+            decode_length = decode_length,
             return_kv_cache = True
         )
 
