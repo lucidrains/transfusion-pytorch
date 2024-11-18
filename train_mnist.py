@@ -13,6 +13,8 @@ import torchvision
 import torchvision.transforms as T
 from torchvision.utils import save_image
 
+from ema_pytorch import EMA
+
 from transfusion_pytorch import Transfusion, print_modality_sample
 
 rmtree('./results', ignore_errors = True)
@@ -51,6 +53,12 @@ model = Transfusion(
         heads = 8
     )
 ).cuda()
+
+ema_model = EMA(
+    model,
+    beta = 0.99,
+    forward_method_names = ('sample',)
+)
 
 class MnistDataset(Dataset):
     def __init__(self):
@@ -96,12 +104,14 @@ for step in range(1, 10_000 + 1):
     optimizer.step()
     optimizer.zero_grad()
 
+    ema_model.update()
+
     print(f'{step}: {loss.item():.3f}')
 
     # eval
 
     if divisible_by(step, 500):
-        one_multimodal_sample = model.sample(max_length = 10, fixed_modality_shape = (14, 14))
+        one_multimodal_sample = ema_model.sample(max_length = 10)
 
         print_modality_sample(one_multimodal_sample)
 

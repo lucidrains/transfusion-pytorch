@@ -7,6 +7,7 @@ from torch.nn import Module
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import Adam
 
+from ema_pytorch import EMA
 from einops import rearrange
 
 import torchvision
@@ -52,6 +53,12 @@ model = Transfusion(
     )
 ).cuda()
 
+ema_model = EMA(
+    model,
+    beta = 0.99,
+    forward_method_names = ('generate_modality_only',)
+)
+
 class MnistDataset(Dataset):
     def __init__(self):
         self.mnist = torchvision.datasets.MNIST(
@@ -91,10 +98,12 @@ for step in range(1, 100_000 + 1):
     optimizer.step()
     optimizer.zero_grad()
 
+    ema_model.update()
+
     print(f'{step}: {loss.item():.3f}')
 
     if divisible_by(step, 500):
-        image = model.generate_modality_only(batch_size = 64)
+        image = ema_model.generate_modality_only(batch_size = 64)
 
         save_image(
             rearrange(image, '(gh gw) 1 h w -> 1 (gh h) (gw w)', gh = 8).detach().cpu(),
