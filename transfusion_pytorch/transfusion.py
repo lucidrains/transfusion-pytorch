@@ -16,7 +16,7 @@ p - positions
 import os
 
 import math
-from functools import partial
+from functools import partial, wraps
 from typing import NamedTuple, Callable, Literal
 
 import torch
@@ -112,6 +112,15 @@ def cast_tuple(t, length = 1):
 
 def tree_map_tensor(sample, fn: Callable):
     return tree_map(lambda t: t if not is_tensor(t) else fn(t), sample)
+
+def add_temp_batch_dim(fn: Callable):
+    @wraps(fn)
+    def inner(t: Tensor, *args, **kwargs) -> Tensor:
+        t = rearrange(t, '... -> 1 ...')
+        out = fn(t, *args, **kwargs)
+        out = rearrange(out, '1 ... -> ...')
+        return out
+    return inner
 
 def eval_decorator(fn):
     def inner(self, *args, **kwargs):
@@ -1014,6 +1023,7 @@ class Transfusion(Module):
         add_flow_direction_loss = False, # figure 7 https://arxiv.org/abs/2410.10356
         direction_loss_weight = 1.,
         velocity_consistency_loss_weight = 1.,
+        modality_encoder_decoder_requires_batch_dim = True, # whether the modality encoder / decoder requires batch dimension, will auto assume it is needed
         odeint_kwargs: dict = dict(
             atol = 1e-5,
             rtol = 1e-5,
@@ -1089,6 +1099,10 @@ class Transfusion(Module):
 
         assert len(self.modality_encoder) == self.num_modalities
         assert len(self.modality_decoder) == self.num_modalities
+
+        # auto handle batch dimension for modality encoder / decoder
+
+        self.maybe_add_temp_batch_dim = add_temp_batch_dim if modality_encoder_decoder_requires_batch_dim else identity
 
         # default token lengths for respective modality
         # fallback if the language model does not come up with valid dimensions
@@ -1178,6 +1192,13 @@ class Transfusion(Module):
     @property
     def device(self):
         return next(self.parameters()).device
+
+    def parameters_without_encoder_decoder(self):
+        return (
+            set(self.parameters()) -
+            set(self.modality_encoder.parameters()) -
+            set(self.modality_decoder.parameters())
+        )
 
     def create_ema(
         self,
@@ -1430,7 +1451,8 @@ class Transfusion(Module):
                 modality = rearrange(modality, '... d -> d ...')
 
             if exists(maybe_modality_decoder):
-                modality = maybe_modality_decoder(modality)
+                maybe_modality_decoder.eval()
+                modality = self.maybe_add_temp_batch_dim(maybe_modality_decoder)(modality)
 
             processed_modality_sample.append((modality_id, modality))
 
@@ -1559,7 +1581,7 @@ class Transfusion(Module):
         if encode_modality and exists(maybe_modality_encode):
             with torch.no_grad():
                 maybe_modality_encode.eval()
-                modalities = maybe_modality_encode(modalities).detach()
+                modalities = self.maybe_add_temp_batch_dim(maybe_modality_encode)(modalities).detach()
 
         shape = modalities.shape
 
@@ -1705,6 +1727,7 @@ class Transfusion(Module):
             sampled_modality = rearrange(sampled_modality, 'b ... d -> b d ...')
 
         if exists(maybe_modality_decoder):
+            maybe_modality_decoder.eval()
             sampled_modality = maybe_modality_decoder(sampled_modality)
 
         return sampled_modality
@@ -1820,12 +1843,18 @@ class Transfusion(Module):
                     modality = (0, modality)
 
                 is_text = not isinstance(modality, tuple)
+                is_modality = not is_text
 
                 if is_text:
                     modality_tensor = modality
                 else:
                     modality_type, modality_tensor = modality
 
+                # auto move modality tensor to correct device
+
+                modality_tensor = modality_tensor.to(device)
+
+                if is_modality:
                     if not is_decoding:
                         modality_transform = self.modality_token_transform[modality_type]
                         maybe_modality_encode = self.modality_encoder[modality_type]
@@ -1836,7 +1865,7 @@ class Transfusion(Module):
 
                             with torch.no_grad():
                                 maybe_modality_encode.eval()
-                                modality_tensor = maybe_modality_encode(modality_tensor).detach()
+                                modality_tensor = self.maybe_add_temp_batch_dim(maybe_modality_encode)(modality_tensor).detach()
 
                         if self.channel_first_latent:
                             modality_tensor = rearrange(modality_tensor, 'd ... -> ... d')
@@ -1844,9 +1873,7 @@ class Transfusion(Module):
                     assert 0 <= modality_type < self.num_modalities, f'received a modality index that is out of range. only {self.num_modalities} modalities specified'
                     assert self.dim_latents[modality_type] == modality_tensor.shape[-1], f'mismatch for modality latent dimension - expected {self.dim_latents[modality_type]} but received {modality_tensor.shape[-1]} - modality shape is {tuple(modality_tensor.shape)}, perhaps you need to set `channel_first_latent = True`'
 
-                # auto move modality tensor to device of model
-
-                modality_tensor = modality_tensor.to(device)
+                # auto ward against scalars (lone start end tokens)
 
                 if modality_tensor.dtype in (torch.int, torch.long) and modality_tensor.ndim == 0:
                     modality_tensor = rearrange(modality_tensor, '-> 1')
