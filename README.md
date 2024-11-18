@@ -163,6 +163,7 @@ sampled = model.generate_text_only(text[:, :1], 1024)
 - [ ] able to turn off meta information and use fixed shape per modality
 - [ ] make kv caching work during sampling and add tests
 - [ ] add down/up sampling unets with skip connections, customizable per modality, with attention in the middle, as in simple diffusion paper
+- [ ] allow for rotary positions to be turned on for 1d modalities, so transfusion can be used for action generation across time
 
 ## Citations
 
