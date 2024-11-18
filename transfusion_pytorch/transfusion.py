@@ -1573,13 +1573,16 @@ class Transfusion(Module):
         if not exists(times):
             times = torch.rand((batch,), device = device)
 
-        padded_times = append_dims(times, tokens.ndim - 1)
+        if return_loss:
+            padded_times = append_dims(times, tokens.ndim - 1)
 
-        noise = torch.randn_like(tokens)
+            noise = torch.randn_like(tokens)
 
-        noised_tokens = padded_times * tokens + (1. - padded_times) * noise
+            noised_tokens = padded_times * tokens + (1. - padded_times) * noise
 
-        flow = tokens - noise
+            flow = tokens - noise
+        else:
+            noised_tokens = tokens
 
         # from latent to model tokens
 
