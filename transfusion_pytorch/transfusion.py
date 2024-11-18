@@ -1179,6 +1179,24 @@ class Transfusion(Module):
     def device(self):
         return next(self.parameters()).device
 
+    def create_ema(
+        self,
+        beta = 0.99,
+        *ema_kwargs
+    ) -> EMA:
+
+        ema = EMA(
+            self,
+            beta = beta,
+            forward_method_names = (
+                'sample',
+                'generate_text_only',
+                'generate_modality_only'
+            )
+        )
+
+        return ema
+
     @torch.no_grad()
     @eval_decorator
     @typecheck

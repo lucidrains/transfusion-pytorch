@@ -53,11 +53,7 @@ model = Transfusion(
     )
 ).cuda()
 
-ema_model = EMA(
-    model,
-    beta = 0.99,
-    forward_method_names = ('generate_modality_only',)
-)
+ema_model = model.create_ema()
 
 class MnistDataset(Dataset):
     def __init__(self):
