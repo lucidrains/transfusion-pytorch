@@ -13,8 +13,6 @@ import torchvision
 import torchvision.transforms as T
 from torchvision.utils import save_image
 
-from ema_pytorch import EMA
-
 from transfusion_pytorch import Transfusion, print_modality_sample
 
 rmtree('./results', ignore_errors = True)

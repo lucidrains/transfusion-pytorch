@@ -7,7 +7,6 @@ from torch.nn import Module
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import Adam
 
-from ema_pytorch import EMA
 from einops import rearrange
 
 import torchvision

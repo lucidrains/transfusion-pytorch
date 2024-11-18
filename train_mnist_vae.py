@@ -16,7 +16,6 @@ import torchvision.transforms as T
 from torchvision.utils import save_image
 
 from tqdm import tqdm
-from ema_pytorch import EMA
 
 from transfusion_pytorch import Transfusion, print_modality_sample
 
