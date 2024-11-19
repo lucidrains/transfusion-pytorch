@@ -270,11 +270,6 @@ def softcap_score_mod(softcap):
         return score
     return inner
 
-# losses
-
-def calc_direction_loss(pred, target):
-    return 0.5 * (1. - einsum(l2norm(pred), l2norm(target), '... d, ... d -> ...'))
-
 # converting a raw list of modality offsets and lengths to tensor
 
 @typecheck
