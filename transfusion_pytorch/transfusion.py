@@ -1579,6 +1579,11 @@ class Transfusion(Module):
                 maybe_modality_encode.eval()
                 modalities = self.maybe_add_temp_batch_dim(maybe_modality_encode)(modalities).detach()
 
+            # maybe channel first
+
+            if self.channel_first_latent:
+                modalities = rearrange(modalities, 'b d ... -> b ... d')
+
         shape = modalities.shape
 
         tokens = modalities
@@ -1588,21 +1593,13 @@ class Transfusion(Module):
         if add_pos_emb:
             assert exists(modality_num_dim), f'modality_num_dim must be set for modality {modality_type} if further injecting axial positional embedding'
 
-            if self.channel_first_latent:
-                _, _, *axial_dims = shape
-            else:
-                _, *axial_dims, _ = shape
+            _, *axial_dims, _ = shape
 
             assert len(axial_dims) == modality_num_dim, f'received modalities of ndim {len(axial_dims)} but expected {modality_num_dim}'
 
         # shapes and device
 
         batch, device = tokens.shape[0], tokens.device
-
-        # maybe channel first
-
-        if self.channel_first_latent:
-            tokens = rearrange(tokens, 'b d ... -> b ... d')
 
         # times
 

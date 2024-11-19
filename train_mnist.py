@@ -28,12 +28,12 @@ def divisible_by(num, den):
 
 class Encoder(Module):
     def forward(self, x):
-        x = rearrange(x, '1 (h p1) (w p2) -> h w (p1 p2)', p1 = 2, p2 = 2)
+        x = rearrange(x, '... 1 (h p1) (w p2) -> ... h w (p1 p2)', p1 = 2, p2 = 2)
         return x * 2 - 1
 
 class Decoder(Module):
     def forward(self, x):
-        x = rearrange(x, 'h w (p1 p2) -> 1 (h p1) (w p2)', p1 = 2, p2 = 2, h = 14)
+        x = rearrange(x, '... h w (p1 p2) -> ... 1 (h p1) (w p2)', p1 = 2, p2 = 2, h = 14)
         return ((x + 1) * 0.5).clamp(min = 0., max = 1.)
 
 model = Transfusion(
