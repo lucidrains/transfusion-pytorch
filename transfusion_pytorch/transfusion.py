@@ -294,7 +294,7 @@ def order_modality_positions_by_seq_offset(
     modalities: Int['b m 3']
 ) -> tuple[Int['b m 3'], Int['b m']]:
 
-    type, offsets, lengths = modalities.unbind(dim = -1)
+    modality_type, offsets, lengths = modalities.unbind(dim = -1)
 
     no_modality_mask = lengths <= 0 # there may be uneven number of modalities per batch sample
     offsets_to_sort = offsets.masked_fill(no_modality_mask, 1e10)
@@ -337,9 +337,9 @@ def embed_modality_tokens(
     output = torch.zeros((batch, seq_len, dim), device = device)
 
     for batch_ind, (one_modality, one_modality_token) in enumerate(zip(modalities, modality_tokens)):
-        for (type, offset, length), batch_modality_token in zip(one_modality, one_modality_token):
+        for (modality_type, offset, length), batch_modality_token in zip(one_modality, one_modality_token):
 
-            if modality_id != type or length <= 0:
+            if modality_id != modality_type or length <= 0:
                 continue
 
             modality_shape = batch_modality_token.shape
