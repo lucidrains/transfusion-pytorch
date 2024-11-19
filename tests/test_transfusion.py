@@ -5,6 +5,8 @@ from copy import deepcopy
 import torch
 from torch import nn, randint, randn, tensor, cuda
 
+from einops import rearrange
+
 import torch._dynamo
 torch._dynamo.config.suppress_errors = True
 
@@ -128,12 +130,15 @@ def test_text(
 
     model(text, return_loss = return_loss)
 
-def test_modality_only():
+@pytest.mark.parametrize('channel_first', (False, True))
+def test_modality_only(
+    channel_first: bool
+):
 
     model = Transfusion(
         num_text_tokens = 256,
         dim_latent = (384, 192),
-        channel_first_latent = True,
+        channel_first_latent = channel_first,
         modality_default_shape = (32,),
         transformer = dict(
             dim = 512,
@@ -142,7 +147,10 @@ def test_modality_only():
         )
     )
 
-    images = randn(2, 192, 8, 8)
+    images = randn(2, 8, 8, 192)
+
+    if channel_first:
+        images = rearrange(images, 'b ... d -> b d ...')
 
     loss = model(images, return_loss = True, modality_type = 1)
 

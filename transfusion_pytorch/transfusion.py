@@ -1579,10 +1579,10 @@ class Transfusion(Module):
                 maybe_modality_encode.eval()
                 modalities = self.maybe_add_temp_batch_dim(maybe_modality_encode)(modalities).detach()
 
-            # maybe channel first
+        # maybe channel first
 
-            if self.channel_first_latent:
-                modalities = rearrange(modalities, 'b d ... -> b ... d')
+        if self.channel_first_latent:
+            modalities = rearrange(modalities, 'b d ... -> b ... d')
 
         shape = modalities.shape
 
