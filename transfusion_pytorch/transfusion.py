@@ -1181,6 +1181,10 @@ class Transfusion(Module):
 
         self.odeint_fn = partial(odeint, **odeint_kwargs)
 
+        # dummy loss
+
+        self.register_buffer('zero', tensor(0.), persistent = False)
+
     @property
     def device(self):
         return next(self.parameters()).device
@@ -1663,6 +1667,8 @@ class Transfusion(Module):
         flow_loss = F.mse_loss(pred_flow, flow)
 
         # maybe velocity consistency loss
+
+        velocity_loss = self.zero
 
         if requires_velocity_consistency:
 
