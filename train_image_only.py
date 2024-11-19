@@ -44,6 +44,7 @@ model = Transfusion(
     modality_decoder = Decoder(),
     add_pos_emb = True,
     modality_num_dim = 2,
+    velocity_consistency_loss_weight = 0.1,
     transformer = dict(
         dim = 64,
         depth = 4,
@@ -85,7 +86,7 @@ optimizer = Adam(model.parameters(), lr = 8e-4)
 
 for step in range(1, 100_000 + 1):
 
-    loss = model(next(iter_dl))
+    loss = model(next(iter_dl), velocity_consistency_ema_model = ema_model)
     loss.backward()
 
     torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
