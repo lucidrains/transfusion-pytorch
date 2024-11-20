@@ -34,8 +34,6 @@ import einx
 from einops.layers.torch import Rearrange
 from einops import rearrange, repeat, reduce, einsum, pack, unpack
 
-from loguru import logger
-
 from ema_pytorch import EMA
 
 from rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
@@ -95,14 +93,15 @@ class ModalityInfo(NamedTuple):
     encoder: Module | None
     decoder: Module | None
     latent_to_model: Module
-    model_to_flow_pred: Module
+    model_to_latent: Module
     add_pos_emb: bool
     pos_emb_mlp: Module | None
-    num_dim: int
+    num_dim: int | None
     dim_latent: int
-    default_modality_shape: tuple[int, ...]
+    default_shape: tuple[int, ...]
     som_id: int
     eom_id: int
+    to_shape_fn: Callable | None
 
 # helper functions
 
@@ -951,8 +950,6 @@ class Transformer(Module):
         if is_decoding_with_cache:
             assert exists(decode_length)
 
-            cache_length = first(cache).shape[-2]
-
             x = x[..., -decode_length:, :]
             cond = cond[..., -decode_length:, :]
 
@@ -1196,7 +1193,7 @@ class Transfusion(Module):
         text_only_mask = torch.arange(effective_num_text_tokens) < num_text_tokens
         self.register_buffer('text_only_logits_mask', text_only_mask, persistent = False)
 
-        self.model_to_latent_preds = ModuleList([Linear(dim, dim_latent, bias = False) for dim_latent in self.dim_latents])
+        self.model_to_latent_projs = ModuleList([Linear(dim, dim_latent, bias = False) for dim_latent in self.dim_latents])
 
         # loss related
 
@@ -1231,7 +1228,7 @@ class Transfusion(Module):
         modality_encoder = self.modality_encoder[modality_type]
         modality_decoder = self.modality_decoder[modality_type]
         latent_to_model = self.latent_to_model_projs[modality_type]
-        model_to_flow_pred = self.model_to_latent_preds[modality_type]
+        model_to_latent = self.model_to_latent_projs[modality_type]
 
         add_pos_emb = self.add_pos_emb[modality_type]
         pos_emb_mlp = self.pos_emb_mlp[modality_type]
@@ -1239,24 +1236,27 @@ class Transfusion(Module):
 
         dim_latent = self.dim_latents[modality_type]
 
-        default_modality_shape = self.modality_default_shape[modality_type]
+        default_shape = self.modality_default_shape[modality_type]
 
         som_id = self.som_ids[modality_type]
         eom_id = self.eom_ids[modality_type]
+
+        to_shape_fn = self.to_modality_shape_fn[modality_type]
 
         return ModalityInfo(
             encoder = modality_encoder,
             decoder = modality_decoder,
             latent_to_model = latent_to_model,
-            model_to_flow_pred = model_to_flow_pred,
+            model_to_latent = model_to_latent,
             add_pos_emb = add_pos_emb,
             pos_emb_mlp = pos_emb_mlp,
             num_dim = modality_num_dim,
             token_transform = modality_token_transform,
             dim_latent = dim_latent,
-            default_modality_shape = default_modality_shape,
+            default_shape = default_shape,
             som_id = som_id,
-            eom_id = eom_id
+            eom_id = eom_id,
+            to_shape_fn = to_shape_fn
         )
 
     def parameters_without_encoder_decoder(self):
@@ -1347,10 +1347,11 @@ class Transfusion(Module):
 
             maybe_meta_tensor = get_tokens_since_rightmost_id(seq, self.meta_id)
 
-            default_shape = self.modality_default_shape[curr_modality_id]
-            maybe_modality_num_dim = self.modality_num_dim[curr_modality_id]
+            mod = self.get_modality_info(curr_modality_id)
 
-            meta_str_to_modality_shape = self.to_modality_shape_fn[curr_modality_id]
+            default_shape = mod.default_shape
+            maybe_modality_num_dim = mod.num_dim
+            meta_str_to_modality_shape = mod.to_shape_fn
 
             if maybe_meta_tensor.numel() > 0:
                 meta_tensor = maybe_meta_tensor[:-1]
@@ -1463,7 +1464,7 @@ class Transfusion(Module):
                             decoding_text_or_modality = 'modality'
                         )
 
-                        flow = mod.model_to_flow_pred(embeds)
+                        flow = mod.model_to_latent(embeds)
 
                         return flow[0, -modality_length:]
 
@@ -1701,8 +1702,6 @@ class Transfusion(Module):
 
         noised_tokens = rearrange(noised_tokens, 'b ... d -> b (...) d')
 
-        seq_len = noised_tokens.shape[-2]
-
         # maybe add axial pos emb
 
         if mod.add_pos_emb:
@@ -1717,7 +1716,7 @@ class Transfusion(Module):
             modality_only = True,
         )
 
-        pred_flow = mod.model_to_flow_pred(embed)
+        pred_flow = mod.model_to_latent(embed)
 
         if not return_loss:
             return pred_flow
@@ -1776,11 +1775,10 @@ class Transfusion(Module):
 
         mod = self.get_modality_info(modality_type)
 
-        modality_shape = default(fixed_modality_shape, mod.default_modality_shape)
+        modality_shape = default(fixed_modality_shape, mod.default_shape)
 
         assert exists(modality_shape)
 
-        axial_dims = modality_shape
         modality_length = math.prod(modality_shape)
 
         noise = torch.randn((batch_size, modality_length, mod.dim_latent), device = device)
@@ -2220,7 +2218,7 @@ class Transfusion(Module):
 
         # flow loss
 
-        pred_flows = [fn(embed) for fn in self.model_to_latent_preds]
+        pred_flows = [fn(embed) for fn in self.model_to_latent_projs]
 
         # early return for velocity consistency ema model
 
