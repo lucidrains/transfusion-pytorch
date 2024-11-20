@@ -74,7 +74,7 @@ try:
 except ImportError:
     flex_attention = None
 
-# constants
+# types
 
 ModalitySample = list[Int[''] | Int['_'] | Float['...'] | tuple[int, Float['...']]]
 
@@ -87,6 +87,20 @@ class LossBreakdown(NamedTuple):
     text: Float['']
     flow: list[Float['']]
     velocity: list[Float['']] | None
+
+class ModalityInfo(NamedTuple):
+    token_transform: Callable
+    encoder: Module | None
+    decoder: Module | None
+    latent_to_model: Module
+    model_to_flow_pred: Module
+    add_pos_emb: bool
+    pos_emb_mlp: Module | None
+    num_dim: int
+    dim_latent: int
+    default_modality_shape: tuple[int, ...]
+    som_id: int
+    eom_id: int
 
 # helper functions
 
@@ -1195,6 +1209,45 @@ class Transfusion(Module):
     def device(self):
         return next(self.parameters()).device
 
+    def get_modality_info(
+        self,
+        modality_type: int | None = None
+    ) -> ModalityInfo:
+
+        modality_type = default(modality_type, 0)
+
+        modality_token_transform = self.modality_token_transform[modality_type]
+        modality_encoder = self.modality_encoder[modality_type]
+        modality_decoder = self.modality_decoder[modality_type]
+        latent_to_model = self.latent_to_model_projs[modality_type]
+        model_to_flow_pred = self.model_to_latent_preds[modality_type]
+
+        add_pos_emb = self.add_pos_emb[modality_type]
+        pos_emb_mlp = self.pos_emb_mlp[modality_type]
+        modality_num_dim = self.modality_num_dim[modality_type]
+
+        dim_latent = self.dim_latents[modality_type]
+
+        default_modality_shape = self.modality_default_shape[modality_type]
+
+        som_id = self.som_ids[modality_type]
+        eom_id = self.eom_ids[modality_type]
+
+        return ModalityInfo(
+            encoder = modality_encoder,
+            decoder = modality_decoder,
+            latent_to_model = latent_to_model,
+            model_to_flow_pred = model_to_flow_pred,
+            add_pos_emb = add_pos_emb,
+            pos_emb_mlp = pos_emb_mlp,
+            num_dim = modality_num_dim,
+            token_transform = modality_token_transform,
+            dim_latent = dim_latent,
+            default_modality_shape = default_modality_shape,
+            som_id = som_id,
+            eom_id = eom_id
+        )
+
     def parameters_without_encoder_decoder(self):
         return (
             set(self.parameters()) -
@@ -1454,14 +1507,14 @@ class Transfusion(Module):
 
             modality_id, modality = sample
 
-            maybe_modality_decoder = self.modality_decoder[modality_id]
+            mod = self.get_modality_info(modality_id)
 
             if self.channel_first_latent:
                 modality = rearrange(modality, '... d -> d ...')
 
-            if exists(maybe_modality_decoder):
+            if exists(mod.decoder):
                 maybe_modality_decoder.eval()
-                modality = self.maybe_add_temp_batch_dim(maybe_modality_decoder)(modality)
+                modality = self.maybe_add_temp_batch_dim(mod.decoder)(modality)
 
             processed_modality_sample.append((modality_id, modality))
 
@@ -1579,23 +1632,14 @@ class Transfusion(Module):
 
         modality_type = default(modality_type, 0)
 
-        transform = self.modality_token_transform[modality_type]
-        maybe_modality_encode = self.modality_encoder[modality_type]
-        latent_to_model_fn = self.latent_to_model_projs[modality_type]
-        model_to_flow_pred_fn = self.model_to_latent_preds[modality_type]
-
-        # grab the shape of the modality, for maybe axial pos emb
-
-        add_pos_emb = self.add_pos_emb[modality_type]
-        maybe_pos_emb_mlp = self.pos_emb_mlp[modality_type]
-        modality_num_dim = self.modality_num_dim[modality_type]
+        mod = self.get_modality_info(modality_type)
 
         # maybe modality encode
 
-        if encode_modality and exists(maybe_modality_encode):
+        if encode_modality and exists(mod.encoder):
             with torch.no_grad():
-                maybe_modality_encode.eval()
-                modalities = self.maybe_add_temp_batch_dim(maybe_modality_encode)(modalities).detach()
+                mod.encoder.eval()
+                modalities = self.maybe_add_temp_batch_dim(mod.encoder)(modalities).detach()
 
         # maybe channel first
 
@@ -1608,12 +1652,12 @@ class Transfusion(Module):
 
         # axial positions
 
-        if add_pos_emb:
-            assert exists(modality_num_dim), f'modality_num_dim must be set for modality {modality_type} if further injecting axial positional embedding'
+        if mod.add_pos_emb:
+            assert exists(mod.num_dim), f'modality_num_dim must be set for modality {modality_type} if further injecting axial positional embedding'
 
             _, *axial_dims, _ = shape
 
-            assert len(axial_dims) == modality_num_dim, f'received modalities of ndim {len(axial_dims)} but expected {modality_num_dim}'
+            assert len(axial_dims) == mod.num_dim, f'received modalities of ndim {len(axial_dims)} but expected {modality_num_dim}'
 
         # shapes and device
 
@@ -1641,11 +1685,11 @@ class Transfusion(Module):
 
         # from latent to model tokens
 
-        noised_tokens = latent_to_model_fn(noised_tokens)
+        noised_tokens = mod.latent_to_model(noised_tokens)
 
         # maybe transform
 
-        noised_tokens = transform(noised_tokens)
+        noised_tokens = mod.token_transform(noised_tokens)
 
         noised_tokens = rearrange(noised_tokens, 'b ... d -> b (...) d')
 
@@ -1653,8 +1697,8 @@ class Transfusion(Module):
 
         # maybe add axial pos emb
 
-        if add_pos_emb:
-            axial_pos_emb = maybe_pos_emb_mlp(tensor(axial_dims), flatten_dims = True)
+        if mod.add_pos_emb:
+            axial_pos_emb = mod.pos_emb_mlp(tensor(axial_dims), flatten_dims = True)
             noised_tokens = noised_tokens + axial_pos_emb
 
         # attention
@@ -1665,7 +1709,7 @@ class Transfusion(Module):
             modality_only = True,
         )
 
-        pred_flow = model_to_flow_pred_fn(embed)
+        pred_flow = mod.model_to_flow_pred(embed)
 
         if not return_loss:
             return pred_flow
@@ -1722,28 +1766,22 @@ class Transfusion(Module):
         if self.num_modalities > 1:
             assert exists(modality_type), '`modality_type` must be explicitly passed in on forward when training on greater than 1 modality'
 
-        modality_type = default(modality_type, 0)
+        mod = self.get_modality_info(modality_type)
 
-        latent_dim = self.dim_latents[modality_type]
-        to_flow_pred = self.model_to_latent_preds[modality_type]
-        maybe_modality_decoder = self.modality_decoder[modality_type]
-        maybe_modality_decoder = self.modality_decoder[modality_type]
-        default_modality_shape = self.modality_default_shape[modality_type]
-
-        modality_shape = default(fixed_modality_shape, default_modality_shape)
+        modality_shape = default(fixed_modality_shape, mod.default_modality_shape)
 
         assert exists(modality_shape)
 
         axial_dims = modality_shape
         modality_length = math.prod(modality_shape)
 
-        noise = torch.randn((batch_size, modality_length, latent_dim), device = device)
+        noise = torch.randn((batch_size, modality_length, mod.dim_latent), device = device)
 
         def ode_step_fn(step_times, denoised):
 
             step_times = repeat(step_times, ' -> b', b = batch_size)
 
-            denoised = denoised.reshape(batch_size, *modality_shape, latent_dim)
+            denoised = denoised.reshape(batch_size, *modality_shape, mod.dim_latent)
 
             flow = self.forward_modality(
                 denoised,
@@ -1763,16 +1801,16 @@ class Transfusion(Module):
 
         # reshape
 
-        sampled_modality = sampled_modality.reshape(batch_size, *modality_shape, latent_dim)
+        sampled_modality = sampled_modality.reshape(batch_size, *modality_shape, mod.dim_latent)
 
         # decode
 
         if self.channel_first_latent:
             sampled_modality = rearrange(sampled_modality, 'b ... d -> b d ...')
 
-        if exists(maybe_modality_decoder):
-            maybe_modality_decoder.eval()
-            sampled_modality = maybe_modality_decoder(sampled_modality)
+        if exists(mod.decoder):
+            mod.decoder.eval()
+            sampled_modality = mod.decoder(sampled_modality)
 
         return sampled_modality
 
@@ -1904,24 +1942,23 @@ class Transfusion(Module):
 
                 modality_tensor = modality_tensor.to(device)
 
+                mod = self.get_modality_info(modality_type)
+
                 if is_modality:
                     if not is_decoding:
-                        modality_transform = self.modality_token_transform[modality_type]
-                        maybe_modality_encode = self.modality_encoder[modality_type]
 
-                        modality_tensor = modality_transform(modality_tensor)
+                        modality_tensor = mod.token_transform(modality_tensor)
 
-                        if exists(maybe_modality_encode):
-
+                        if exists(mod.encoder):
                             with torch.no_grad():
-                                maybe_modality_encode.eval()
-                                modality_tensor = self.maybe_add_temp_batch_dim(maybe_modality_encode)(modality_tensor).detach()
+                                mod.encoder.eval()
+                                modality_tensor = self.maybe_add_temp_batch_dim(mod.encoder)(modality_tensor).detach()
 
                         if self.channel_first_latent:
                             modality_tensor = rearrange(modality_tensor, 'd ... -> ... d')
 
                     assert 0 <= modality_type < self.num_modalities, f'received a modality index that is out of range. only {self.num_modalities} modalities specified'
-                    assert self.dim_latents[modality_type] == modality_tensor.shape[-1], f'mismatch for modality latent dimension - expected {self.dim_latents[modality_type]} but received {modality_tensor.shape[-1]} - modality shape is {tuple(modality_tensor.shape)}, perhaps you need to set `channel_first_latent = True`'
+                    assert mod.dim_latent == modality_tensor.shape[-1], f'mismatch for modality latent dimension - expected {mod.dim_latent} but received {modality_tensor.shape[-1]} - modality shape is {tuple(modality_tensor.shape)}, perhaps you need to set `channel_first_latent = True`'
 
                 # auto ward against scalars (lone start end tokens)
 
@@ -1957,7 +1994,7 @@ class Transfusion(Module):
                 if not return_embed:
                     # add the [som] and [eom] tokens for the modality type
 
-                    som_id, eom_id = self.som_ids[modality_type], self.eom_ids[modality_type]
+                    som_id, eom_id = mod.som_id, mod.eom_id
 
                     # start by just storing the token length of the modality
 
@@ -1988,10 +2025,8 @@ class Transfusion(Module):
 
                 if need_axial_pos_emb:
 
-                    modality_pos_mlp = self.pos_emb_mlp[modality_type]
-
-                    if exists(modality_pos_mlp):
-                        pos_emb = modality_pos_mlp(tensor(modality_shape_tuple), flatten_dims= True)
+                    if exists(mod.pos_emb_mlp):
+                        pos_emb = mod.pos_emb_mlp(tensor(modality_shape_tuple), flatten_dims= True)
 
                         pos_emb = F.pad(pos_emb, (0, 0, precede_modality_tokens, succeed_modality_tokens), value = 0.)
                     else:
