@@ -1521,7 +1521,7 @@ class Transfusion(Module):
                 modality = rearrange(modality, '... d -> d ...')
 
             if exists(mod.decoder):
-                maybe_modality_decoder.eval()
+                mod.decoder.eval()
                 modality = self.maybe_add_temp_batch_dim(mod.decoder)(modality)
 
             processed_modality_sample.append((modality_id, modality))
