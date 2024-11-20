@@ -1259,6 +1259,9 @@ class Transfusion(Module):
             to_shape_fn = to_shape_fn
         )
 
+    def get_all_modality_info(self) -> list[ModalityInfo]:
+        return [self.get_modality_info(i) for i in range(self.num_modalities)]
+
     def parameters_without_encoder_decoder(self):
         return (
             set(self.parameters()) -
