@@ -133,11 +133,7 @@ model = Transfusion(
 
 # training transfusion
 
-def collate_fn(data):
-    data = [*map(list, data)]
-    return data
-
-dataloader = DataLoader(dataset, batch_size = 16, collate_fn = collate_fn, shuffle = True)
+dataloader = model.create_dataloader(dataset, batch_size = 16, collate_fn = collate_fn, shuffle = True)
 iter_dl = cycle(dataloader)
 
 optimizer = Adam(model.parameters_without_encoder_decoder(), lr = 3e-4)

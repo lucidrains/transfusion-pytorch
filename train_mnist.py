@@ -79,8 +79,8 @@ def collate_fn(data):
     return data
 
 dataset = MnistDataset()
+dataloader = model.create_dataloader(dataset, batch_size = 16, shuffle = True)
 
-dataloader = DataLoader(dataset, batch_size = 16, collate_fn = collate_fn, shuffle = True)
 iter_dl = cycle(dataloader)
 
 optimizer = Adam(model.parameters(), lr = 3e-4)

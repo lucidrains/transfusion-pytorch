@@ -23,6 +23,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn, Tensor, tensor, is_tensor, stack
 from torch.nn import Module, ModuleList, Linear
+
+from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils._pytree import tree_map, tree_flatten, tree_unflatten
 
@@ -233,6 +235,15 @@ def gumbel_noise(t):
 def gumbel_sample(t, temperature = 1., dim = -1, keepdim = True):
     noise = gumbel_noise(t) * int(temperature > 0)
     return (t / temperature + noise).argmax(dim = dim, keepdim = keepdim)
+
+# dataloader related
+
+def collate_fn(data):
+    return [*map(list, data)]
+
+@typecheck
+def create_dataloader(dataset: Dataset, **kwargs) -> DataLoader:
+    return DataLoader(dataset, collate_fn = collate_fn, **kwargs)
 
 # flex attention mask construction
 # https://pytorch.org/blog/flexattention/
@@ -1190,6 +1201,13 @@ class Transfusion(Module):
             set(self.modality_encoder.parameters()) -
             set(self.modality_decoder.parameters())
         )
+
+    def create_dataloader(
+        self,
+        *args,
+        **kwargs
+    ):
+        return create_dataloader(*args, **kwargs)
 
     def create_ema(
         self,
