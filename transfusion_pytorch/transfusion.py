@@ -31,8 +31,8 @@ from torch.utils._pytree import tree_map, tree_flatten, tree_unflatten
 from torchdiffeq import odeint
 
 import einx
-from einops import rearrange, repeat, reduce, einsum, pack
 from einops.layers.torch import Rearrange
+from einops import rearrange, repeat, reduce, einsum, pack, unpack
 
 from loguru import logger
 
@@ -76,6 +76,8 @@ except ImportError:
 
 # types
 
+Scalar = Float['']
+
 ModalitySample = list[Int[''] | Int['_'] | Float['...'] | tuple[int, Float['...']]]
 
 ModalityTokenTransform = str | Callable | None
@@ -83,10 +85,10 @@ ModalityTokenTransform = str | Callable | None
 RawModalityPositions = list[list[tuple[int, int, int]]]
 
 class LossBreakdown(NamedTuple):
-    total: Float['']
-    text: Float['']
-    flow: list[Float['']]
-    velocity: list[Float['']] | None
+    total: Scalar
+    text: Scalar
+    flow: list[Scalar]
+    velocity: list[Scalar] | None
 
 class ModalityInfo(NamedTuple):
     token_transform: Callable
@@ -136,6 +138,15 @@ def add_temp_batch_dim(fn: Callable):
         out = rearrange(out, '1 ... -> ...')
         return out
     return inner
+
+def pack_one_with_inverse(t, pattern):
+    packed, packed_shape = pack([t], pattern)
+
+    def inverse(out, inv_pattern = None):
+        inv_pattern = default(inv_pattern, pattern)
+        return unpack(out, packed_shape, inv_pattern)[0]
+
+    return packed, inverse
 
 def eval_decorator(fn):
     def inner(self, *args, **kwargs):
@@ -878,7 +889,7 @@ class Transformer(Module):
     def forward(
         self,
         x,
-        times: Float[''] | Float['b'] | Float['b n'] | None = None,
+        times: Scalar | Float['b'] | Float['b n'] | None = None,
         attn_mask: Bool['b i j'] | None = None,
         modality_positions: RawModalityPositions | Int['b m 3'] | None = None,
         is_any_modality: bool | Bool['b n'] | None = None,
@@ -1420,19 +1431,17 @@ class Transfusion(Module):
                     assert exists(curr_modality_id)
                     pbar.set_description(f'decoding modality [{curr_modality_id}]')
 
-                    latent_dim = self.dim_latents[curr_modality_id]
-
-                    maybe_modality_decoder = self.modality_decoder[curr_modality_id]
+                    mod = self.get_modality_info(curr_modality_id)
 
                     modality_length = math.prod(modality_shape)
 
                     if exists(init_modality_noise):
-                        noise = init_modality_noise[:modality_length, :latent_dim]
+                        noise = init_modality_noise[:modality_length, :mod.dim_latent]
                     else:
                         assert exists(modality_length)
-                        noise = torch.randn((modality_length, latent_dim), device = device)
+                        noise = torch.randn((modality_length, mod.dim_latent), device = device)
 
-                    assert noise.shape == (modality_length, latent_dim)
+                    assert noise.shape == (modality_length, mod.dim_latent)
 
                     new_kv_cache = None
 
@@ -1442,7 +1451,7 @@ class Transfusion(Module):
                         step_times = rearrange(step_times, ' -> 1 1') # batch size of 1
                         step_times = F.pad(step_times, (num_past_modalities, 0), value = 1.) # past decoded modalities receive a time conditioning of 1.
 
-                        denoised = denoised.reshape(*modality_shape, latent_dim)
+                        denoised = denoised.reshape(*modality_shape, mod.dim_latent)
 
                         embeds, new_kv_cache = self.forward(
                             [[*modality_sample, (curr_modality_id, denoised)]],
@@ -1454,8 +1463,7 @@ class Transfusion(Module):
                             decoding_text_or_modality = 'modality'
                         )
 
-                        to_flow_pred = self.model_to_latent_preds[curr_modality_id]
-                        flow = to_flow_pred(embeds)
+                        flow = mod.model_to_flow_pred(embeds)
 
                         return flow[0, -modality_length:]
 
@@ -1468,13 +1476,13 @@ class Transfusion(Module):
 
                     # reshape
 
-                    sampled_modality = sampled_modality.reshape(*modality_shape, latent_dim)
+                    sampled_modality = sampled_modality.reshape(*modality_shape, mod.dim_latent)
 
                     modality_sample.append((curr_modality_id, sampled_modality))
 
                     # add the appropriate [eom]
 
-                    eom_id = self.eom_ids[curr_modality_id]
+                    eom_id = mod.eom_id
                     modality_sample.append(tensor([eom_id], device = device))
 
                     # set kv cache if needed
@@ -1529,7 +1537,7 @@ class Transfusion(Module):
         cache: Tensor | None = None,
         return_kv_cache = False
     ) -> (
-        Float[''] |
+        Scalar |
         Float['b n d'] |
         tuple[Float['b n d'], list[Float['...']]]
     ):
@@ -1621,7 +1629,7 @@ class Transfusion(Module):
         velocity_consistency_delta_time = 1e-5,
         return_loss = True,
         return_loss_breakdown = False
-    ) -> Float[''] | Float['b ...']:
+    ) -> Scalar | Float['b ...']:
 
         requires_velocity_consistency = exists(velocity_consistency_ema_model)
 
@@ -1839,8 +1847,8 @@ class Transfusion(Module):
         Float['b _ l'] |
         Float['b _ d'] |
         tuple[Float['b _ _'], Tensor] |
-        Float[''] |
-        tuple[Float[''], LossBreakdown] |
+        Scalar |
+        tuple[Scalar, LossBreakdown] |
         list[Float['b _ _']]
     ):
         is_decoding = exists(decoding_text_or_modality)
