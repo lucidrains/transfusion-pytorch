@@ -102,6 +102,7 @@ class ModalityInfo(NamedTuple):
     som_id: int
     eom_id: int
     to_shape_fn: Callable | None
+    channel_first_latent: bool
 
 # helper functions
 
@@ -1035,7 +1036,7 @@ class Transfusion(Module):
         num_text_tokens,
         transformer: dict | Transformer,
         dim_latent: int | tuple[int, ...] | None = None,
-        channel_first_latent = False,
+        channel_first_latent: bool | tuple[bool, ...] = False,
         add_pos_emb: bool | tuple[bool, ...] = False,
         modality_encoder: Module | tuple[Module, ...] | None = None,
         modality_decoder: Module | tuple[Module, ...] | None = None,
@@ -1074,14 +1075,15 @@ class Transfusion(Module):
 
         self.dim_latents = cast_tuple(dim_latent)
 
-        # whether the latents are accepted to be channel first or channel last
-        # if channel first, will be rearrange(c ... -> ... c -> (...) c)
-
-        self.channel_first_latent = channel_first_latent
-
         # number of modalities
 
         self.num_modalities = len(self.dim_latents)
+
+        # whether the latents are accepted to be channel first or channel last
+        # if channel first, will be rearrange(c ... -> ... c -> (...) c)
+
+        self.channel_first_latent = cast_tuple(channel_first_latent, self.num_modalities)
+        assert len(self.channel_first_latent) == self.num_modalities
 
         # functions for converting the sampled language model meta string back to modality shape of tuple[int, ...]
 
@@ -1243,6 +1245,8 @@ class Transfusion(Module):
 
         to_shape_fn = self.to_modality_shape_fn[modality_type]
 
+        channel_first_latent = self.channel_first_latent[modality_type]
+
         return ModalityInfo(
             encoder = modality_encoder,
             decoder = modality_decoder,
@@ -1256,7 +1260,8 @@ class Transfusion(Module):
             default_shape = default_shape,
             som_id = som_id,
             eom_id = eom_id,
-            to_shape_fn = to_shape_fn
+            to_shape_fn = to_shape_fn,
+            channel_first_latent = channel_first_latent
         )
 
     def get_all_modality_info(self) -> list[ModalityInfo]:
@@ -1521,7 +1526,7 @@ class Transfusion(Module):
 
             mod = self.get_modality_info(modality_id)
 
-            if self.channel_first_latent:
+            if mod.channel_first_latent:
                 modality = rearrange(modality, '... d -> d ...')
 
             if exists(mod.decoder):
@@ -1655,7 +1660,7 @@ class Transfusion(Module):
 
         # maybe channel first
 
-        if self.channel_first_latent:
+        if mod.channel_first_latent:
             modalities = rearrange(modalities, 'b d ... -> b ... d')
 
         shape = modalities.shape
@@ -1814,7 +1819,7 @@ class Transfusion(Module):
 
         # decode
 
-        if self.channel_first_latent:
+        if mod.channel_first_latent:
             sampled_modality = rearrange(sampled_modality, 'b ... d -> b d ...')
 
         if exists(mod.decoder):
@@ -1963,7 +1968,7 @@ class Transfusion(Module):
                                 mod.encoder.eval()
                                 modality_tensor = self.maybe_add_temp_batch_dim(mod.encoder)(modality_tensor).detach()
 
-                        if self.channel_first_latent:
+                        if mod.channel_first_latent:
                             modality_tensor = rearrange(modality_tensor, 'd ... -> ... d')
 
                     assert 0 <= modality_type < self.num_modalities, f'received a modality index that is out of range. only {self.num_modalities} modalities specified'
