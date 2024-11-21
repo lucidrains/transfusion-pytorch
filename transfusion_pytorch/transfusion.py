@@ -1178,7 +1178,27 @@ class Transfusion(Module):
 
         assert len(self.modality_token_transform) == self.num_modalities
 
-        self.latent_to_model_projs = ModuleList([Linear(dim_latent, dim) if dim_latent != dim else nn.Identity() for dim_latent in self.dim_latents])
+        # latent to model and back
+        # by default will be Linear, with or without rearranges depending on channel_first_latent setting
+        # can also be overridden for the unet down/up as in the paper
+
+        latent_to_model_projs = []
+        model_to_latent_projs = []
+
+        for dim_latent, one_channel_first_latent in zip(self.dim_latents, self.channel_first_latent):
+
+            latent_to_model_proj = Linear(dim_latent, dim) if dim_latent != dim else nn.Identity()
+            model_to_latent_proj = Linear(dim, dim_latent, bias = False)
+
+            if one_channel_first_latent:
+                latent_model_to_proj = nn.Sequential(Rearrange('b d ... -> b ... d'), latent_to_model_proj, Rearrange('b ... d -> b d ...'))
+                model_to_latent_proj = nn.Sequential(Rearrange('b d ... -> b ... d'), model_to_latent_proj, Rearrange('b ... d -> b d ...'))
+
+            latent_to_model_projs.append(latent_model_to_proj)
+            model_to_latent_projs.append(model_to_latent_proj)
+
+        self.latent_to_model_projs = ModuleList(latent_to_model_projs)
+        self.model_to_latent_projs = ModuleList(model_to_latent_projs)
 
         # relative positions
 
@@ -1194,8 +1214,6 @@ class Transfusion(Module):
 
         text_only_mask = torch.arange(effective_num_text_tokens) < num_text_tokens
         self.register_buffer('text_only_logits_mask', text_only_mask, persistent = False)
-
-        self.model_to_latent_projs = ModuleList([Linear(dim, dim_latent, bias = False) for dim_latent in self.dim_latents])
 
         # loss related
 
@@ -1658,25 +1676,21 @@ class Transfusion(Module):
                 mod.encoder.eval()
                 modalities = self.maybe_add_temp_batch_dim(mod.encoder)(modalities).detach()
 
-        # maybe channel first
-
-        if mod.channel_first_latent:
-            modalities = rearrange(modalities, 'b d ... -> b ... d')
-
-        shape = modalities.shape
-
-        tokens = modalities
-
         # axial positions
 
         if mod.add_pos_emb:
             assert exists(mod.num_dim), f'modality_num_dim must be set for modality {modality_type} if further injecting axial positional embedding'
 
-            _, *axial_dims, _ = shape
+            if mod.channel_first_latent:
+                _, _, *axial_dims = modalities.shape
+            else:
+                _, *axial_dims, _ = modalities.shape
 
             assert len(axial_dims) == mod.num_dim, f'received modalities of ndim {len(axial_dims)} but expected {modality_num_dim}'
 
         # shapes and device
+
+        tokens = modalities
 
         batch, device = tokens.shape[0], tokens.device
 
@@ -1704,11 +1718,16 @@ class Transfusion(Module):
 
         noised_tokens = mod.latent_to_model(noised_tokens)
 
+        # maybe channel first
+
+        if mod.channel_first_latent:
+            noised_tokens = rearrange(noised_tokens, 'b d ... -> b ... d')
+
         # maybe transform
 
         noised_tokens = mod.token_transform(noised_tokens)
 
-        noised_tokens = rearrange(noised_tokens, 'b ... d -> b (...) d')
+        noised_tokens, inverse_pack_axial_dims = pack_one_with_inverse(noised_tokens, 'b * d')
 
         # maybe add axial pos emb
 
@@ -1724,14 +1743,17 @@ class Transfusion(Module):
             modality_only = True,
         )
 
+        embed = inverse_pack_axial_dims(embed)
+
+        if mod.channel_first_latent:
+            embed = rearrange(embed, 'b ... d -> b d ...')
+
         pred_flow = mod.model_to_latent(embed)
 
         if not return_loss:
             return pred_flow
 
         # flow loss
-
-        flow = rearrange(flow, 'b ... d -> b (...) d')
 
         flow_loss = F.mse_loss(pred_flow, flow)
 
@@ -1789,13 +1811,14 @@ class Transfusion(Module):
 
         modality_length = math.prod(modality_shape)
 
-        noise = torch.randn((batch_size, modality_length, mod.dim_latent), device = device)
+        noise = torch.randn((batch_size, *modality_shape, mod.dim_latent), device = device)
+
+        if mod.channel_first_latent:
+            noise = rearrange(noise, 'b ... d -> b d ...')
 
         def ode_step_fn(step_times, denoised):
 
             step_times = repeat(step_times, ' -> b', b = batch_size)
-
-            denoised = denoised.reshape(batch_size, *modality_shape, mod.dim_latent)
 
             flow = self.forward_modality(
                 denoised,
@@ -1813,14 +1836,7 @@ class Transfusion(Module):
 
         sampled_modality = trajectory[-1]
 
-        # reshape
-
-        sampled_modality = sampled_modality.reshape(batch_size, *modality_shape, mod.dim_latent)
-
         # decode
-
-        if mod.channel_first_latent:
-            sampled_modality = rearrange(sampled_modality, 'b ... d -> b d ...')
 
         if exists(mod.decoder):
             mod.decoder.eval()
