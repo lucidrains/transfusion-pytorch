@@ -19,6 +19,12 @@ rmtree('./results', ignore_errors = True)
 results_folder = Path('./results')
 results_folder.mkdir(exist_ok = True, parents = True)
 
+# constants
+
+IMAGE_AFTER_TEXT = False
+NUM_TRAIN_STEPS = 10_000
+SAMPLE_EVERY = 500
+
 # functions
 
 def divisible_by(num, den):
@@ -67,7 +73,13 @@ class MnistDataset(Dataset):
     def __getitem__(self, idx):
         pil, labels = self.mnist[idx]
         digit_tensor = T.PILToTensor()(pil)
-        return tensor(labels), (digit_tensor / 255).float()
+        output =  tensor(labels), (digit_tensor / 255).float()
+
+        if IMAGE_AFTER_TEXT:
+            first, second = output
+            output = (second, first)
+
+        return output
 
 def cycle(iter_dl):
     while True:
@@ -87,7 +99,7 @@ optimizer = Adam(model.parameters(), lr = 3e-4)
 
 # train loop
 
-for step in range(1, 10_000 + 1):
+for step in range(1, NUM_TRAIN_STEPS + 1):
     model.train()
 
     loss = model(next(iter_dl))
@@ -104,15 +116,18 @@ for step in range(1, 10_000 + 1):
 
     # eval
 
-    if divisible_by(step, 500):
-        one_multimodal_sample = ema_model.sample(max_length = 10)
+    if divisible_by(step, SAMPLE_EVERY):
+        one_multimodal_sample = ema_model.sample(max_length = 384)
 
         print_modality_sample(one_multimodal_sample)
 
         if len(one_multimodal_sample) < 2:
             continue
 
-        maybe_label, maybe_image, *_ = one_multimodal_sample
+        if IMAGE_AFTER_TEXT:
+            _, maybe_image, maybe_label = one_multimodal_sample
+        else:
+            maybe_label, maybe_image, *_ = one_multimodal_sample
 
         filename = f'{step}.{maybe_label[1].item()}.png'
 

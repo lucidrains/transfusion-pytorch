@@ -1528,6 +1528,8 @@ class Transfusion(Module):
 
                     is_decoding_text = True
 
+        logger.info(f'sampling stopped at length: {curr_length} / {max_length}')
+
         if return_unprocessed_modalities:
             return modality_sample
 
