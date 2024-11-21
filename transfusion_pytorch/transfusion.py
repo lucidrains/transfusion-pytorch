@@ -1050,6 +1050,7 @@ class Transfusion(Module):
         add_pos_emb: bool | tuple[bool, ...] = False,
         modality_encoder: Module | tuple[Module, ...] | None = None,
         modality_decoder: Module | tuple[Module, ...] | None = None,
+        pre_post_transformer_enc_dec: tuple[Module, Module] | tuple[tuple[Module, Module], ...] | None = None,
         modality_token_transform: tuple[ModalityTokenTransform, ...] | ModalityTokenTransform | None = None,
         modality_default_shape: tuple[int, ...] | tuple[tuple[int, ...], ...] | None = None,
         fallback_to_default_shape_if_invalid = False,
@@ -1188,14 +1189,32 @@ class Transfusion(Module):
 
         assert len(self.modality_token_transform) == self.num_modalities
 
+        # prepare pre-post transformer encoder / decoder, for the learnable unets as in paper
+
+        if is_bearable(pre_post_transformer_enc_dec, tuple[Module, Module]):
+            pre_post_transformer_enc_dec = (pre_post_transformer_enc_dec,)
+
+        pre_post_transformer_enc_dec = cast_tuple(pre_post_transformer_enc_dec, self.num_modalities)
+        assert len(pre_post_transformer_enc_dec) == self.num_modalities
+
         # latent to model and back
         # by default will be Linear, with or without rearranges depending on channel_first_latent setting
-        # can also be overridden for the unet down/up as in the paper
+        # can also be overridden for the unet down/up as in the paper with `pre_post_transformer_enc_dec: tuple[Module, Module]`
 
         latent_to_model_projs = []
         model_to_latent_projs = []
 
-        for dim_latent, one_channel_first_latent in zip(self.dim_latents, self.channel_first_latent):
+        for (
+            dim_latent,
+            one_channel_first_latent,
+            enc_dec,
+         ) in zip(
+            self.dim_latents,
+            self.channel_first_latent,
+            pre_post_transformer_enc_dec
+        ):
+
+            pre_attend_enc, post_attend_dec = default(enc_dec, (None, None))
 
             latent_to_model_proj = Linear(dim_latent, dim) if dim_latent != dim else nn.Identity()
             model_to_latent_proj = Linear(dim, dim_latent, bias = False)
@@ -1204,8 +1223,8 @@ class Transfusion(Module):
                 latent_to_model_proj = nn.Sequential(Rearrange('b d ... -> b ... d'), latent_to_model_proj, Rearrange('b ... d -> b d ...'))
                 model_to_latent_proj = nn.Sequential(Rearrange('b d ... -> b ... d'), model_to_latent_proj, Rearrange('b ... d -> b d ...'))
 
-            latent_to_model_projs.append(latent_to_model_proj)
-            model_to_latent_projs.append(model_to_latent_proj)
+            latent_to_model_projs.append(default(pre_attend_enc, latent_to_model_proj))
+            model_to_latent_projs.append(default(post_attend_dec, model_to_latent_proj))
 
         self.latent_to_model_projs = ModuleList(latent_to_model_projs)
         self.model_to_latent_projs = ModuleList(model_to_latent_projs)
@@ -1706,18 +1725,6 @@ class Transfusion(Module):
                 mod.encoder.eval()
                 modalities = self.maybe_add_temp_batch_dim(mod.encoder)(modalities).detach()
 
-        # axial positions
-
-        if mod.add_pos_emb:
-            assert exists(mod.num_dim), f'modality_num_dim must be set for modality {modality_type} if further injecting axial positional embedding'
-
-            if mod.channel_first_latent:
-                _, _, *axial_dims = modalities.shape
-            else:
-                _, *axial_dims, _ = modalities.shape
-
-            assert len(axial_dims) == mod.num_dim, f'received modalities of ndim {len(axial_dims)} but expected {modality_num_dim}'
-
         # shapes and device
 
         tokens = modalities
@@ -1752,6 +1759,15 @@ class Transfusion(Module):
 
         if mod.channel_first_latent:
             noised_tokens = rearrange(noised_tokens, 'b d ... -> b ... d')
+
+        # axial positions
+
+        if mod.add_pos_emb:
+            assert exists(mod.num_dim), f'modality_num_dim must be set for modality {modality_type} if further injecting axial positional embedding'
+
+            _, *axial_dims, _ = noised_tokens.shape
+
+            assert len(axial_dims) == mod.num_dim, f'received modalities of ndim {len(axial_dims)} but expected {modality_num_dim}'
 
         # maybe transform
 
