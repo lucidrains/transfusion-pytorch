@@ -1481,6 +1481,9 @@ class Transfusion(Module):
 
                     assert noise.shape == (modality_length, mod.dim_latent)
 
+                    if mod.channel_first_latent:
+                        noise = rearrange(noise, 'n d -> d n')
+
                     new_kv_cache = None
 
                     def ode_step_fn(step_times, denoised):
@@ -1489,7 +1492,10 @@ class Transfusion(Module):
                         step_times = rearrange(step_times, ' -> 1 1') # batch size of 1
                         step_times = F.pad(step_times, (num_past_modalities, 0), value = 1.) # past decoded modalities receive a time conditioning of 1.
 
-                        denoised = denoised.reshape(*modality_shape, mod.dim_latent)
+                        if mod.channel_first_latent:
+                            denoised = denoised.reshape(mod.dim_latent, *modality_shape)
+                        else:
+                            denoised = denoised.reshape(*modality_shape, mod.dim_latent)
 
                         embeds, new_kv_cache = self.forward(
                             [[*modality_sample, (curr_modality_id, denoised)]],
@@ -1501,11 +1507,22 @@ class Transfusion(Module):
                             decoding_text_or_modality = 'modality'
                         )
 
+                        if mod.channel_first_latent:
+                            embeds = rearrange(embeds, 'b ... d -> b d ...')
+
                         flow = mod.model_to_latent(embeds)
 
-                        return flow[0, -modality_length:]
+                        flow_slice = slice(-modality_length, None)
+
+                        if mod.channel_first_latent:
+                            flow = flow[0, ..., flow_slice]
+                        else:
+                            flow = flow[0, flow_slice]
+
+                        return flow
 
                     times = torch.linspace(0, 1, modality_steps, device = device)
+
                     trajectory = self.odeint_fn(ode_step_fn, noise, times)
 
                     # add the sampled modality tokens
@@ -1514,7 +1531,10 @@ class Transfusion(Module):
 
                     # reshape
 
-                    sampled_modality = sampled_modality.reshape(*modality_shape, mod.dim_latent)
+                    if mod.channel_first_latent:
+                        sampled_modality = sampled_modality.reshape(mod.dim_latent, *modality_shape)
+                    else:
+                        sampled_modality = sampled_modality.reshape(*modality_shape, mod.dim_latent)
 
                     modality_sample.append((curr_modality_id, sampled_modality))
 
@@ -1556,9 +1576,6 @@ class Transfusion(Module):
             modality_id, modality = sample
 
             mod = self.get_modality_info(modality_id)
-
-            if mod.channel_first_latent:
-                modality = rearrange(modality, '... d -> d ...')
 
             if exists(mod.decoder):
                 mod.decoder.eval()

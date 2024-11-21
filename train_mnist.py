@@ -23,7 +23,7 @@ results_folder.mkdir(exist_ok = True, parents = True)
 
 IMAGE_AFTER_TEXT = False
 NUM_TRAIN_STEPS = 10_000
-SAMPLE_EVERY = 500
+SAMPLE_EVERY = 250
 CHANNEL_FIRST = False
 
 # functions
@@ -46,7 +46,7 @@ class Decoder(Module):
     def forward(self, x):
 
         if CHANNEL_FIRST:
-            x = rearrange(x, 'b d ... -> b ...')
+            x = rearrange(x, 'b d ... -> b ... d')
 
         x = rearrange(x, '... h w (p1 p2) -> ... 1 (h p1) (w p2)', p1 = 2, p2 = 2, h = 14)
         return ((x + 1) * 0.5).clamp(min = 0., max = 1.)
