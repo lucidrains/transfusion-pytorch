@@ -296,3 +296,34 @@ def test_axial_pos_emb():
     # after much training
 
     one_multimodal_sample = model.sample()
+
+# unet related
+
+def test_modality_only_with_unet():
+
+    model = Transfusion(
+        num_text_tokens = 10,
+        dim_latent = 4,
+        modality_default_shape = (14, 14),
+        pre_post_transformer_enc_dec = (
+            nn.Conv2d(4, 64, 3, 2, 1),
+            nn.ConvTranspose2d(64, 4, 3, 2, 1, output_padding = 1),
+        ),
+        channel_first_latent = True,
+        add_pos_emb = True,
+        modality_num_dim = 2,
+        velocity_consistency_loss_weight = 0.1,
+        transformer = dict(
+            dim = 64,
+            depth = 1,
+            dim_head = 32,
+            heads = 8
+        )
+    )
+
+    x = torch.randn(1, 4, 14, 14)
+
+    loss = model(x)
+    loss.backward()
+
+    sampled = model.generate_modality_only()
