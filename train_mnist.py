@@ -24,6 +24,7 @@ results_folder.mkdir(exist_ok = True, parents = True)
 IMAGE_AFTER_TEXT = False
 NUM_TRAIN_STEPS = 10_000
 SAMPLE_EVERY = 500
+CHANNEL_FIRST = False
 
 # functions
 
@@ -35,10 +36,18 @@ def divisible_by(num, den):
 class Encoder(Module):
     def forward(self, x):
         x = rearrange(x, '... 1 (h p1) (w p2) -> ... h w (p1 p2)', p1 = 2, p2 = 2)
+
+        if CHANNEL_FIRST:
+            x = rearrange(x, 'b ... d -> b d ...')
+
         return x * 2 - 1
 
 class Decoder(Module):
     def forward(self, x):
+
+        if CHANNEL_FIRST:
+            x = rearrange(x, 'b d ... -> b ...')
+
         x = rearrange(x, '... h w (p1 p2) -> ... 1 (h p1) (w p2)', p1 = 2, p2 = 2, h = 14)
         return ((x + 1) * 0.5).clamp(min = 0., max = 1.)
 
@@ -50,6 +59,7 @@ model = Transfusion(
     modality_decoder = Decoder(),
     add_pos_emb = True,
     modality_num_dim = 2,
+    channel_first_latent = CHANNEL_FIRST,
     transformer = dict(
         dim = 64,
         depth = 4,
@@ -75,11 +85,11 @@ class MnistDataset(Dataset):
         digit_tensor = T.PILToTensor()(pil)
         output =  tensor(labels), (digit_tensor / 255).float()
 
-        if IMAGE_AFTER_TEXT:
-            first, second = output
-            output = (second, first)
+        if not IMAGE_AFTER_TEXT:
+            return output
 
-        return output
+        first, second = output
+        return second, first
 
 def cycle(iter_dl):
     while True:
