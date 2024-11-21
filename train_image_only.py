@@ -28,18 +28,18 @@ def divisible_by(num, den):
 
 class Encoder(Module):
     def forward(self, x):
-        x = rearrange(x, '... 1 (h p1) (w p2) -> ... (p1 p2) h w', p1 = 2, p2 = 2)
+        x = rearrange(x, '... 1 (h p1) (w p2) -> ... h w (p1 p2)', p1 = 2, p2 = 2)
         return x * 2 - 1
 
 class Decoder(Module):
     def forward(self, x):
-        x = rearrange(x, '... (p1 p2) h w -> ... 1 (h p1) (w p2)', p1 = 2, p2 = 2, h = 14)
+        x = rearrange(x, '... h w (p1 p2) -> ... 1 (h p1) (w p2)', p1 = 2, p2 = 2, h = 14)
         return ((x + 1) * 0.5).clamp(min = 0., max = 1.)
 
 model = Transfusion(
     num_text_tokens = 10,
     dim_latent = 4,
-    channel_first_latent = True,
+    channel_first_latent = False,
     modality_default_shape = (14, 14),
     modality_encoder = Encoder(),
     modality_decoder = Decoder(),

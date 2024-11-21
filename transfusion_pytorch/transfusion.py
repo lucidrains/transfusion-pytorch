@@ -1191,10 +1191,10 @@ class Transfusion(Module):
             model_to_latent_proj = Linear(dim, dim_latent, bias = False)
 
             if one_channel_first_latent:
-                latent_model_to_proj = nn.Sequential(Rearrange('b d ... -> b ... d'), latent_to_model_proj, Rearrange('b ... d -> b d ...'))
+                latent_to_model_proj = nn.Sequential(Rearrange('b d ... -> b ... d'), latent_to_model_proj, Rearrange('b ... d -> b d ...'))
                 model_to_latent_proj = nn.Sequential(Rearrange('b d ... -> b ... d'), model_to_latent_proj, Rearrange('b ... d -> b d ...'))
 
-            latent_to_model_projs.append(latent_model_to_proj)
+            latent_to_model_projs.append(latent_to_model_proj)
             model_to_latent_projs.append(model_to_latent_proj)
 
         self.latent_to_model_projs = ModuleList(latent_to_model_projs)
@@ -1823,6 +1823,7 @@ class Transfusion(Module):
             flow = self.forward_modality(
                 denoised,
                 times = step_times,
+                modality_type = modality_type,
                 encode_modality = False,
                 return_loss = False
             )

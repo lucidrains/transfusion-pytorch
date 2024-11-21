@@ -156,6 +156,7 @@ def test_modality_only(
 
     loss.backward()
 
+    model.generate_modality_only(modality_type = 1)
 
 @pytest.mark.parametrize('custom_time_fn', (False, True))
 def test_text_image_end_to_end(
