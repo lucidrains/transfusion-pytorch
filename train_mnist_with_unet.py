@@ -15,6 +15,8 @@ from torchvision.utils import save_image
 
 from transfusion_pytorch import Transfusion, print_modality_sample
 
+device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+
 rmtree('./results', ignore_errors = True)
 results_folder = Path('./results')
 results_folder.mkdir(exist_ok = True, parents = True)
@@ -61,7 +63,7 @@ model = Transfusion(
         dim_head = 32,
         heads = 8
     )
-).cuda()
+).to(device)
 
 ema_model = model.create_ema()
 

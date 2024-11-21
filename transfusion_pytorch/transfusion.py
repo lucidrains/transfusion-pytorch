@@ -89,7 +89,6 @@ class LossBreakdown(NamedTuple):
     velocity: list[Scalar] | None
 
 class ModalityInfo(NamedTuple):
-    token_transform: Callable
     encoder: Module | None
     decoder: Module | None
     latent_to_model: Module
@@ -1051,7 +1050,6 @@ class Transfusion(Module):
         modality_encoder: Module | tuple[Module, ...] | None = None,
         modality_decoder: Module | tuple[Module, ...] | None = None,
         pre_post_transformer_enc_dec: tuple[Module, Module] | tuple[tuple[Module, Module], ...] | None = None,
-        modality_token_transform: tuple[ModalityTokenTransform, ...] | ModalityTokenTransform | None = None,
         modality_default_shape: tuple[int, ...] | tuple[tuple[int, ...], ...] | None = None,
         fallback_to_default_shape_if_invalid = False,
         modality_num_dim: int | tuple[int, ...] | None = None,
@@ -1181,14 +1179,6 @@ class Transfusion(Module):
 
         num_meta_tokens = 128 + 1
 
-        # modality transforms
-
-        modality_token_transform = cast_tuple(modality_token_transform, self.num_modalities)
-        modality_token_transform = [default(transform, identity) for transform in modality_token_transform]
-        self.modality_token_transform = [Rearrange(maybe_einops_eq) if isinstance(maybe_einops_eq, str) else maybe_einops_eq for maybe_einops_eq in modality_token_transform]
-
-        assert len(self.modality_token_transform) == self.num_modalities
-
         # prepare pre-post transformer encoder / decoder, for the learnable unets as in paper
 
         if is_bearable(pre_post_transformer_enc_dec, tuple[Module, Module]):
@@ -1274,7 +1264,6 @@ class Transfusion(Module):
 
         modality_type = default(modality_type, 0)
 
-        modality_token_transform = self.modality_token_transform[modality_type]
         modality_encoder = self.modality_encoder[modality_type]
         modality_decoder = self.modality_decoder[modality_type]
         latent_to_model = self.latent_to_model_projs[modality_type]
@@ -1303,7 +1292,6 @@ class Transfusion(Module):
             add_pos_emb = add_pos_emb,
             pos_emb_mlp = pos_emb_mlp,
             num_dim = modality_num_dim,
-            token_transform = modality_token_transform,
             dim_latent = dim_latent,
             default_shape = default_shape,
             som_id = som_id,
@@ -1771,8 +1759,6 @@ class Transfusion(Module):
 
         # maybe transform
 
-        noised_tokens = mod.token_transform(noised_tokens)
-
         noised_tokens, inverse_pack_axial_dims = pack_one_with_inverse(noised_tokens, 'b * d')
 
         # maybe add axial pos emb
@@ -2023,8 +2009,6 @@ class Transfusion(Module):
 
                 if is_modality:
                     if not is_decoding:
-
-                        modality_tensor = mod.token_transform(modality_tensor)
 
                         if exists(mod.encoder):
                             with torch.no_grad():
