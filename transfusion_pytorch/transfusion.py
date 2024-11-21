@@ -2370,7 +2370,7 @@ class Transfusion(Module):
 
             velocity_match_losses = []
 
-            for ema_pred_flow, pred_flow, is_one_modality in zip(ema_pred_flows, pred_flows, is_modalities.unbind(dim = 1)):
+            for mod, ema_pred_flow, pred_flow, is_one_modality in zip(self.get_all_modality_info(), ema_pred_flows, pred_flows, is_modalities.unbind(dim = 1)):
 
                 velocity_match_loss = F.mse_loss(
                     pred_flow,
@@ -2379,6 +2379,9 @@ class Transfusion(Module):
                 )
 
                 is_one_modality = reduce(is_one_modality, 'b m n -> b n', 'any')
+
+                if mod.channel_first_latent:
+                    velocity_match_loss = rearrange(velocity_match_loss, 'b d ... -> b ... d')
 
                 velocity_match_loss = velocity_match_loss[is_one_modality].mean()
 
