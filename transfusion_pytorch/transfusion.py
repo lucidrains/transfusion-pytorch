@@ -2334,20 +2334,16 @@ class Transfusion(Module):
         for modality_id, (flow, pred_flow, is_one_modality) in enumerate(zip(flows, pred_flows, is_modalities.unbind(dim = 1))):
             mod = self.get_modality_info(modality_id)
 
-            flow_loss = F.mse_loss(
-                pred_flow,
-                flow,
-                reduction = 'none'
-            )
+            is_one_modality = reduce(is_one_modality, 'b m n -> b n', 'any')
+            modality_loss_weight = is_one_modality.sum() / total_tokens
 
             if mod.channel_first_latent:
-                flow_loss = rearrange(flow_loss, 'b d ... -> b ... d')
+                pred_flow, flow = tuple(rearrange(t, 'b d ... -> b ... d') for t in (pred_flow, flow))
 
-            is_one_modality = reduce(is_one_modality, 'b m n -> b n', 'any')
-
-            flow_loss = flow_loss[is_one_modality].mean()
-
-            modality_loss_weight = is_one_modality.sum() / total_tokens
+            flow_loss = F.mse_loss(
+                pred_flow[is_one_modality],
+                flow[is_one_modality]
+            )
 
             modality_loss_weights.append(modality_loss_weight)
 
