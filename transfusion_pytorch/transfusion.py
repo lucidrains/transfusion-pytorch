@@ -715,7 +715,8 @@ class Attention(Module):
         dropout = 0.,
         softcap_value = 50.,
         use_flex_attn = False,
-        gate_values = True
+        gate_values = True,
+        learned_value_residual_mix = False
     ):
         super().__init__()
         self.scale = dim_head ** -0.5
@@ -728,6 +729,12 @@ class Attention(Module):
             Linear(dim, dim_inner * 3, bias = False),
             Rearrange('b n (qkv h d) -> qkv b h n d', qkv = 3, h = heads)
         )
+
+        self.to_learned_value_residual = nn.Sequential(
+            nn.Linear(dim, heads),
+            nn.Sigmoid(),
+            Rearrange('b n h -> b h n 1') # add head dimension
+        ) if learned_value_residual_mix else (lambda _: 0.5)
 
         self.to_gates = nn.Sequential(
             nn.Linear(dim, heads, bias = False),
@@ -777,7 +784,8 @@ class Attention(Module):
         orig_v = v
 
         if exists(value_residual):
-            v = 0.5 * (v + value_residual)
+            mix = self.to_learned_value_residual(x)
+            v = v * mix + value_residual * (1. - mix)
 
         # handle cache being passed in
 
@@ -878,11 +886,13 @@ class Transformer(Module):
         layers = ModuleList([])
 
         for ind in range(depth):
+            is_first = ind == 0
+
             is_latter_half = ind >= (depth / 2)
 
             skip_proj = Linear(dim * 2, dim, bias = False) if is_latter_half and unet_skips else None
 
-            attn = Attention(dim = dim, dim_head = dim_head, heads = heads, dropout = dropout, use_flex_attn = use_flex_attn, **attn_kwargs)
+            attn = Attention(dim = dim, dim_head = dim_head, heads = heads, dropout = dropout, use_flex_attn = use_flex_attn, learned_value_residual_mix = not is_first, **attn_kwargs)
 
             ff = FeedForward(dim = dim, expansion_factor = ff_expansion_factor, **ff_kwargs)
 
