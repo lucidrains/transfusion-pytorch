@@ -359,10 +359,11 @@ def derive_rotary_positions_from_modality_positions(
 
 # modality tokens are given as list of tensors, can be then be embedded into the modality tokens for attending alongside text tokens
 
+@typecheck
 def embed_modality_tokens(
     seq_len: int,
     dim: int,
-    modality_tokens: list[list[Float['_ d'] | Float['d _']]],
+    modality_tokens: list[list[Float['... d'] | Float['d ...']]],
     modalities: Int['b m 3'],
     modality_id: int,
     channel_first: bool
@@ -382,9 +383,13 @@ def embed_modality_tokens(
             modality_shape = batch_modality_token.shape
 
             if channel_first:
-                mod_dim, mod_length = modality_shape
+                mod_dim, *mod_axial_shape = modality_shape
+                batch_modality_token = rearrange(batch_modality_token, 'd ... -> d (...)')
             else:
-                mod_length, mod_dim = modality_shape
+                *mod_axial_shape, mod_dim = modality_shape
+                batch_modality_token = rearrange(batch_modality_token, '... d -> (...) d')
+
+            mod_length = math.prod(mod_axial_shape)
 
             assert length == mod_length, f'received a modality of shape {modality_shape} but sequence length in modalities info is {length}'
             assert dim == mod_dim, f'received modality [{modality_id}] with shape {modality_shape} but expected dimension of {dim}'
@@ -2086,11 +2091,6 @@ class Transfusion(Module):
                 batch_modality_positions.append((modality_type, offset + precede_modality_tokens, modality_length)) # offset + preceding meta tag length (which includes the modality start token)
 
                 offset += modality_length + precede_modality_tokens + succeed_modality_tokens # +2 due to [som] and [eom] - then account for meta start id and modality shape information (or eventually any meta information about modality)
-
-                if mod.channel_first_latent:
-                    modality_tensor = rearrange(modality_tensor, 'd ... -> d (...)')
-                else:
-                    modality_tensor = rearrange(modality_tensor, '... d -> (...) d')
 
                 batch_modality_tokens.append(modality_tensor)
                 batch_text.append(text_tensor)
