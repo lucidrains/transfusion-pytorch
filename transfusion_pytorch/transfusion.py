@@ -363,7 +363,7 @@ def derive_rotary_positions_from_modality_positions(
 def embed_modality_tokens(
     seq_len: int,
     dim: int,
-    modality_tokens: list[list[Float['... d'] | Float['d ...']]],
+    modality_tokens: list[list[Float['...']]],
     modalities: Int['b m 3'],
     modality_id: int,
     channel_first: bool
