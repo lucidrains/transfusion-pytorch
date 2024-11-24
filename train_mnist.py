@@ -24,7 +24,7 @@ results_folder.mkdir(exist_ok = True, parents = True)
 IMAGE_AFTER_TEXT = False
 NUM_TRAIN_STEPS = 10_000
 SAMPLE_EVERY = 250
-CHANNEL_FIRST = False
+CHANNEL_FIRST = True
 
 # functions
 

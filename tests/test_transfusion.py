@@ -36,7 +36,7 @@ def test_transfusion(
         dim_latent = (384, 192), # specify multiple latent dimensions
         modality_default_shape = ((32,), (64,)),
         transformer = dict(
-            dim = 512,
+            dim = 64,
             depth = 2,
             use_flex_attn = use_flex_attn
         )
@@ -80,7 +80,7 @@ def test_auto_modality_transform(
         channel_first_latent = True,
         modality_default_shape = (32,),
         transformer = dict(
-            dim = 512,
+            dim = 64,
             depth = 2,
             use_flex_attn = use_flex_attn
         )
@@ -117,7 +117,7 @@ def test_text(
         channel_first_latent = True,
         modality_default_shape = (32,),
         transformer = dict(
-            dim = 512,
+            dim = 64,
             depth = 2,
             use_flex_attn = use_flex_attn
         )
@@ -141,7 +141,7 @@ def test_modality_only(
         channel_first_latent = channel_first,
         modality_default_shape = (32,),
         transformer = dict(
-            dim = 512,
+            dim = 64,
             depth = 2,
             use_flex_attn = False
         )
@@ -173,8 +173,8 @@ def test_text_image_end_to_end(
         modality_encoder = mock_vae_encoder,
         modality_decoder = mock_vae_decoder,
         transformer = dict(
-            dim = 512,
-            depth = 8
+            dim = 64,
+            depth = 2
         )
     )
 
@@ -196,24 +196,26 @@ def test_text_image_end_to_end(
 
     # allow researchers to experiment with different time distributions across multiple modalities in a sample
 
-    def modality_length_to_times(modality_length):
-        has_modality = modality_length > 0
-        return torch.where(has_modality, torch.ones_like(modality_length), 0.)
+    def num_modalities_to_times(num_modalities):
+        batch = num_modalities.shape[0]
+        device = num_modalities.device
+        total_modalities = num_modalities.amax().item()
+        return torch.ones((batch, total_modalities), device = device)
 
-    time_fn = modality_length_to_times if custom_time_fn else None
+    time_fn = num_modalities_to_times if custom_time_fn else None
 
     # forward
 
     loss = model(
         text_and_images,
-        modality_length_to_times_fn = time_fn
+        num_modalities_to_times_fn = time_fn
     )
 
     loss.backward()
 
     # after much training
 
-    one_multimodal_sample = model.sample()
+    one_multimodal_sample = model.sample(max_length = 128)
 
 def test_velocity_consistency():
     mock_encoder = nn.Conv2d(3, 384, 3, padding = 1)
@@ -228,7 +230,7 @@ def test_velocity_consistency():
         modality_encoder = mock_encoder,
         modality_decoder = mock_decoder,
         transformer = dict(
-            dim = 512,
+            dim = 64,
             depth = 1
         )
     )
@@ -251,14 +253,9 @@ def test_velocity_consistency():
         ]
     ]
 
-    def modality_length_to_times(modality_length):
-        has_modality = modality_length > 0
-        return torch.where(has_modality, torch.ones_like(modality_length), 0.)
-
     loss, breakdown = model(
         text_and_images,
         velocity_consistency_ema_model = ema_model,
-        modality_length_to_times_fn = modality_length_to_times,
         return_breakdown = True
     )
 
@@ -275,7 +272,7 @@ def test_axial_pos_emb():
         add_pos_emb = True,
         modality_num_dim = (2, 1),
         transformer = dict(
-            dim = 512,
+            dim = 64,
             depth = 8
         )
     )
@@ -295,7 +292,7 @@ def test_axial_pos_emb():
 
     # after much training
 
-    one_multimodal_sample = model.sample()
+    one_multimodal_sample = model.sample(max_length = 128)
 
 # unet related
 
