@@ -1546,7 +1546,9 @@ class Transfusion(Module):
 
                         parse_embed = get_pred_flows[curr_modality_id][-1]
 
-                        flow = add_temp_batch_dim(mod.model_to_latent)(parse_embed(embeds))
+                        parsed_embed = parse_embed(embeds, need_splice = not exists(cache))
+
+                        flow = add_temp_batch_dim(mod.model_to_latent)(parsed_embed)
 
                         return flow
 
@@ -2161,10 +2163,14 @@ class Transfusion(Module):
 
                 def model_to_pred_flow(batch_index, start_index, modality_length, unpack_fn):
 
-                    def inner(embed: Float['b n d']) -> Float['...']:
-                        modality_embed = embed[batch_index, start_index:(start_index + modality_length)]
-                        modality_embed = unpack_fn(modality_embed)
-                        return modality_embed
+                    def inner(embed: Float['b n d'], need_splice = True) -> Float['...']:
+                        embed = embed[batch_index]
+
+                        if need_splice:
+                            embed = embed[start_index:(start_index + modality_length)]
+
+                        embed = unpack_fn(embed)
+                        return embed
 
                     return inner
 
@@ -2334,9 +2340,9 @@ class Transfusion(Module):
             modality_get_pred_flows = get_pred_flows[modality_id]
 
             modality_pred_flows = []
+
             for get_pred_flow in modality_get_pred_flows:
                 pred_flow = get_pred_flow(embed)
-
                 pred_flow = add_temp_batch_dim(mod.model_to_latent)(pred_flow) 
                 modality_pred_flows.append(pred_flow)
 
