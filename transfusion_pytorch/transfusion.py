@@ -249,6 +249,9 @@ def max_neg_value(t):
 def append_dims(t, ndims):
     return t.reshape(*t.shape, *((1,) * ndims))
 
+def is_empty(t):
+    return t.numel() == 0
+
 def log(t, eps = 1e-20):
     return torch.log(t.clamp(min = eps))
 
@@ -1856,8 +1859,6 @@ class Transfusion(Module):
 
         assert exists(modality_shape)
 
-        modality_length = math.prod(modality_shape)
-
         noise = torch.randn((batch_size, *modality_shape, mod.dim_latent), device = device)
 
         if mod.channel_first_latent:
@@ -1986,6 +1987,49 @@ class Transfusion(Module):
 
         need_axial_pos_emb = any(self.add_pos_emb)
 
+        # standardize modalities to be tuple - type 0 modality is implicit if not given
+        # also store modality lengths for determining noising times
+
+        modality_lens = []
+
+        for batch_modalities in modalities:
+            batch_modality_lens = []
+
+            for ind, modality in enumerate(batch_modalities):
+                if is_tensor(modality) and modality.dtype == torch.float:
+                    modality = (0, modality)
+
+                if not isinstance(modality, tuple):
+                    continue
+
+                modality_type, modality_tensor = modality
+                mod = self.get_modality_info(modality_type)
+
+                batch_modalities[ind] = modality
+                seq_dim = 0 if mod.channel_first_latent else -1
+                batch_modality_lens.append(modality_tensor.shape[seq_dim])
+
+            modality_lens.append(tensor_(batch_modality_lens))
+
+        modality_lens = pad_sequence(modality_lens)
+
+        # determine the times
+
+        if not exists(times):
+            if is_empty(modality_lens):
+                times = modality_lens.float()
+            else:
+                modality_length_to_times_fn = default(modality_length_to_times_fn, default_modality_length_to_time_fn)
+
+                if exists(modality_length_to_times_fn):
+                    times = modality_length_to_times_fn(modality_lens)
+        
+        # if needs velocity matching, make sure times are in the range of 0 - (1. - <velocity consistency delta time>)
+
+        if need_velocity_matching:
+            orig_times = times.clone()
+            times = times * (1. - velocity_consistency_delta_time)
+
         # process list of text and modalities interspersed with one another
 
         modality_positions = []
@@ -2004,9 +2048,6 @@ class Transfusion(Module):
             for modality in batch_modalities:
                 # if non-text modality detected and not given as a tuple
                 # cast to (int, Tensor) where int is defaulted to type 0 (convenience for one modality)
-
-                if is_tensor(modality) and modality.dtype == torch.float:
-                    modality = (0, modality)
 
                 is_text = not isinstance(modality, tuple)
                 is_modality = not is_text
@@ -2142,7 +2183,7 @@ class Transfusion(Module):
             modality_positions = modality_positions_to_tensor(modality_positions, device = device)
 
         if modality_positions.shape[-1] == 2: # Int['b m 2'] -> Int['b m 3'] if type is not given (one modality)
-            modality_positions = F.pad(modality_positions, (1, 0), value = 0)
+            modality_positions = F.pad(modality_positions, (1, 0))
 
         # for now use dummy padding modality position info if empty (all zeros)
 
@@ -2178,18 +2219,7 @@ class Transfusion(Module):
 
         # noise the modality tokens
 
-        if not exists(times):
-            modality_length_to_times_fn = default(modality_length_to_times_fn, default_modality_length_to_time_fn)
-
-            if exists(modality_length_to_times_fn):
-                times = modality_length_to_times_fn(modality_positions[..., -1])
-
         times_per_token = einsum(is_modalities.float(), times, 'b t m n, b m -> b t n')
-
-        # if needs velocity matching, make sure times are in the range of 0 - (1. - <velocity consistency delta time>)
-
-        if need_velocity_matching:
-            times_per_token = times_per_token * (1. - velocity_consistency_delta_time)
 
         # noise only if returning loss
 
@@ -2370,7 +2400,7 @@ class Transfusion(Module):
 
                 ema_pred_flows = velocity_consistency_ema_model(
                     velocity_modalities,
-                    times = times + velocity_consistency_delta_time,
+                    times = orig_times + velocity_consistency_delta_time,
                     return_only_pred_flows = True
                 )
 
