@@ -90,7 +90,7 @@ class LossBreakdown(NamedTuple):
     text: Scalar
     flow: list[Scalar]
     velocity: list[Scalar] | None
-    recon: list[Scalar] | None
+    recon: list[Scalar] | None = None
 
 class ModalityInfo(NamedTuple):
     encoder: Module | None
