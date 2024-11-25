@@ -75,9 +75,9 @@ model = Transfusion(
     velocity_consistency_loss_weight = 0.1,
     reconstruction_loss_weight = 0.1,
     transformer = dict(
-        dim = 64,
-        depth = 4,
-        dim_head = 32,
+        dim = 256,
+        depth = 8,
+        dim_head = 64,
         heads = 8
     )
 ).cuda()
