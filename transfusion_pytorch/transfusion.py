@@ -90,6 +90,7 @@ class LossBreakdown(NamedTuple):
     text: Scalar
     flow: list[Scalar]
     velocity: list[Scalar] | None
+    recon: list[Scalar] | None
 
 class ModalityInfo(NamedTuple):
     encoder: Module | None
@@ -1085,6 +1086,7 @@ class Transfusion(Module):
         flow_loss_weight = 1.,
         text_loss_weight = 1.,
         velocity_consistency_loss_weight = 0.1,
+        reconstruction_loss_weight = 0.,
         modality_encoder_decoder_requires_batch_dim = True, # whether the modality encoder / decoder requires batch dimension, will auto assume it is needed
         odeint_kwargs: dict = dict(
             atol = 1e-5,
@@ -1276,6 +1278,11 @@ class Transfusion(Module):
         # velocity consistency weight - only added if EMA model is passed in during training
 
         self.velocity_consistency_loss_weight = velocity_consistency_loss_weight
+
+        # additional reconstruction loss, through the decoder
+
+        self.has_recon_loss = reconstruction_loss_weight > 0.
+        self.reconstruction_loss_weight = reconstruction_loss_weight
 
         # flow sampling related
 
@@ -1711,10 +1718,10 @@ class Transfusion(Module):
         return_loss = True,
         return_loss_breakdown = False
     ) -> Scalar | Float['b ...']:
-
         requires_velocity_consistency = exists(velocity_consistency_ema_model)
 
         modalities = modalities.to(self.device)
+        orig_modalities = modalities
 
         if self.num_modalities > 1:
             assert exists(modality_type), '`modality_type` must be explicitly passed in on forward when training on greater than 1 modality'
@@ -1754,6 +1761,7 @@ class Transfusion(Module):
             noised_tokens = padded_times * tokens + (1. - padded_times) * noise
 
             flow = tokens - noise
+
         else:
             noised_tokens = tokens
 
@@ -1816,17 +1824,37 @@ class Transfusion(Module):
 
             velocity_loss = F.mse_loss(flow, flow_with_delta_time)
 
+        # maybe recon loss
+
+        recon_loss = self.zero
+
+        if self.has_recon_loss:
+            assert encode_modality
+
+            recon = noise + pred_flow * (1. - padded_times)
+
+            if exists(mod.decoder):
+                with torch.no_grad():
+                    mod.decoder.eval()
+                    recon = self.maybe_add_temp_batch_dim(mod.decoder)(recon)
+
+            recon_loss = F.mse_loss(
+                recon,
+                orig_modalities
+            )
+
         # total loss
 
         total_loss = (
             flow_loss +
-            velocity_loss * self.velocity_consistency_loss_weight
+            velocity_loss * self.velocity_consistency_loss_weight +
+            recon_loss * self.reconstruction_loss_weight
         )
 
         if not return_loss_breakdown:
             return total_loss
 
-        return total_loss, (flow_loss, velocity_loss)
+        return total_loss, (flow_loss, velocity_loss, recon_loss)
 
     @torch.no_grad()
     @eval_decorator

@@ -46,6 +46,7 @@ model = Transfusion(
     add_pos_emb = True,
     modality_num_dim = 2,
     velocity_consistency_loss_weight = 0.1,
+    reconstruction_loss_weight = 0.1,
     transformer = dict(
         dim = 64,
         depth = 4,
