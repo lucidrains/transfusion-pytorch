@@ -1836,7 +1836,7 @@ class Transfusion(Module):
             if exists(mod.decoder):
                 with torch.no_grad():
                     mod.decoder.eval()
-                    recon = self.maybe_add_temp_batch_dim(mod.decoder)(recon)
+                    recon = mod.decoder(recon)
 
             recon_loss = F.mse_loss(
                 recon,
