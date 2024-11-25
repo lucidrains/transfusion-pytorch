@@ -18,6 +18,33 @@ from transfusion_pytorch import Transfusion, print_modality_sample
 # hf related
 
 from datasets import load_dataset
+from diffusers.models import AutoencoderKL
+
+vae = AutoencoderKL.from_pretrained("CompVis/stable-diffusion-v1-4", subfolder = "vae")
+
+class Encoder(Module):
+    def __init__(self, vae):
+        super().__init__()
+        self.vae = vae
+
+    def forward(self, image):
+        with torch.no_grad():
+            latent = self.vae.encode(image * 2 - 1)
+
+        return 0.18215 * latent.latent_dist.sample()
+
+class Decoder(Module):
+    def __init__(self, vae):
+        super().__init__()
+        self.vae = vae
+
+    def forward(self, latents):
+        latents = (1 / 0.18215) * latents
+
+        with torch.no_grad():
+            image = self.vae.decode(latents).sample
+
+        return (image / 2 + 0.5).clamp(0, 1)
 
 # results folder
 
@@ -36,23 +63,13 @@ def divisible_by(num, den):
 
 # encoder / decoder
 
-class Encoder(Module):
-    def forward(self, x):
-        x = rearrange(x, '... c (h p1) (w p2) -> ... h w (p1 p2 c)', p1 = 4, p2 = 4)
-        return x * 2 - 1
-
-class Decoder(Module):
-    def forward(self, x):
-        x = rearrange(x, '... h w (p1 p2 c) -> ... c (h p1) (w p2)', p1 = 4, p2 = 4, c = 3)
-        return ((x + 1) * 0.5).clamp(min = 0., max = 1.)
-
 model = Transfusion(
     num_text_tokens = 10,
-    dim_latent = 4 * 4 * 3,
-    channel_first_latent = False,
-    modality_default_shape = (16, 16),
-    modality_encoder = Encoder(),
-    modality_decoder = Decoder(),
+    dim_latent = 4,
+    channel_first_latent = True,
+    modality_default_shape = (32, 32),
+    modality_encoder = Encoder(vae),
+    modality_decoder = Decoder(vae),
     add_pos_emb = True,
     modality_num_dim = 2,
     velocity_consistency_loss_weight = 0.1,
@@ -65,28 +82,34 @@ model = Transfusion(
     )
 ).cuda()
 
-ema_model = model.create_ema()
+ema_model = model.create_ema(0.9)
 
 class FlowersDataset(Dataset):
-    def __init__(self):
+    def __init__(self, image_size):
         self.ds = load_dataset("nelorth/oxford-flowers")['train']
+
+        self.transform = T.Compose([
+            T.Resize((image_size, image_size)),
+            T.PILToTensor()
+        ])
 
     def __len__(self):
         return len(self.ds)
 
     def __getitem__(self, idx):
         pil = self.ds[idx]['image']
-        image_tensor = T.PILToTensor()(pil)
-        return T.Resize((64, 64))(image_tensor / 255.)
+        tensor = self.transform(pil)
+        return tensor / 255.
 
 def cycle(iter_dl):
     while True:
         for batch in iter_dl:
             yield batch
 
-dataset = FlowersDataset()
+dataset = FlowersDataset(256)
 
-dataloader = DataLoader(dataset, batch_size = 32, shuffle = True)
+dataloader = DataLoader(dataset, batch_size = 4, shuffle = True)
+
 iter_dl = cycle(dataloader)
 
 optimizer = Adam(model.parameters(), lr = 8e-4)
@@ -95,8 +118,9 @@ optimizer = Adam(model.parameters(), lr = 8e-4)
 
 for step in range(1, 100_000 + 1):
 
-    loss = model.forward_modality(next(iter_dl))
-    loss.backward()
+    for _ in range(4):
+        loss = model.forward_modality(next(iter_dl))
+        (loss / 4).backward()
 
     torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
 
@@ -108,9 +132,9 @@ for step in range(1, 100_000 + 1):
     print(f'{step}: {loss.item():.3f}')
 
     if divisible_by(step, SAMPLE_EVERY):
-        image = ema_model.generate_modality_only(batch_size = 64)
+        image = ema_model.generate_modality_only(batch_size = 4)
 
         save_image(
-            rearrange(image, '(gh gw) c h w -> c (gh h) (gw w)', gh = 8).detach().cpu(),
+            rearrange(image, '(gh gw) c h w -> c (gh h) (gw w)', gh = 2).detach().cpu(),
             str(results_folder / f'{step}.png')
         )
