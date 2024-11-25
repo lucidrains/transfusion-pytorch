@@ -22,7 +22,7 @@ from typing import NamedTuple, Callable, Literal
 
 import torch
 import torch.nn.functional as F
-from torch import nn, Tensor, tensor, is_tensor, stack
+from torch import nn, Tensor, tensor, is_tensor, cat, stack
 from torch.nn import Module, ModuleList, Linear
 
 from torch.utils.data import Dataset, DataLoader
@@ -808,8 +808,8 @@ class Attention(Module):
 
         if exists(cache):
             cached_k, cached_v = cache
-            k = torch.cat((cached_k, k), dim = -2)
-            v = torch.cat((cached_v, v), dim = -2)
+            k = cat((cached_k, k), dim = -2)
+            v = cat((cached_v, v), dim = -2)
 
         # maybe kv cache
 
@@ -1030,7 +1030,7 @@ class Transformer(Module):
                 skip = skips.pop()
 
                 residual = x
-                x = torch.cat((x, skip), dim = -1)
+                x = cat((x, skip), dim = -1)
                 x = skip_proj(x) + residual
 
             # attention and feedforward
@@ -1695,7 +1695,7 @@ class Transfusion(Module):
 
             sample = gumbel_sample(logits, temperature = temperature, dim = -1)
 
-            out = torch.cat((out, sample), dim = -1)
+            out = cat((out, sample), dim = -1)
 
         return out[..., prompt_seq_len:]
 
@@ -2147,7 +2147,7 @@ class Transfusion(Module):
                     precede_modality_tokens = len(modality_meta_info) + 2
                     succeed_modality_tokens = 1
 
-                    text_tensor = torch.cat((
+                    text_tensor = cat((
                         tensor_([self.meta_id]),
                         modality_meta_info,
                         tensor_([som_id]),
@@ -2200,12 +2200,12 @@ class Transfusion(Module):
 
                     batch_modality_pos_emb.append(pos_emb)
 
-            text.append(torch.cat(batch_text))
+            text.append(cat(batch_text))
 
             if need_axial_pos_emb:
-                modality_pos_emb.append(torch.cat(batch_modality_pos_emb, dim = -2))
+                modality_pos_emb.append(cat(batch_modality_pos_emb, dim = -2))
 
-            modality_tokens.append(torch.cat(batch_modality_tokens))
+            modality_tokens.append(cat(batch_modality_tokens))
             modality_positions.append(batch_modality_positions)
 
             modality_index += 1
