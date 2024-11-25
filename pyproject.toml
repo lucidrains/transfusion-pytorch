@@ -48,6 +48,7 @@ build-backend = "hatchling.build"
 
 examples = [
     "datasets",
+    "diffusers"
 ]
 test = [
     "pytest",

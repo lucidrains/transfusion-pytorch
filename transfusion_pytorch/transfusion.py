@@ -1735,7 +1735,7 @@ class Transfusion(Module):
         if encode_modality and exists(mod.encoder):
             with torch.no_grad():
                 mod.encoder.eval()
-                modalities = self.maybe_add_temp_batch_dim(mod.encoder)(modalities).detach()
+                modalities = mod.encoder(modalities).detach()
 
         # shapes and device
 
