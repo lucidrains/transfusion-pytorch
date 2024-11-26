@@ -20,9 +20,11 @@ from transfusion_pytorch.transfusion import (
 
 @pytest.mark.parametrize('cache_kv', (False, True))
 @pytest.mark.parametrize('use_flex_attn', (False, True))
+@pytest.mark.parametrize('reconstruction_loss_weight', (0., 0.1))
 def test_transfusion(
     cache_kv: bool,
     use_flex_attn: bool,
+    reconstruction_loss_weight: float
 ):
 
     if use_flex_attn and (not exists(flex_attention) or not cuda_available):
@@ -33,8 +35,9 @@ def test_transfusion(
 
     model = Transfusion(
         num_text_tokens = text_tokens,
-        dim_latent = (384, 192), # specify multiple latent dimensions
+        dim_latent = (384, 192),
         modality_default_shape = ((32,), (64,)),
+        reconstruction_loss_weight = reconstruction_loss_weight,
         transformer = dict(
             dim = 64,
             depth = 2,

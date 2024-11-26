@@ -89,7 +89,7 @@ class LossBreakdown(NamedTuple):
     total: Scalar
     text: Scalar
     flow: list[Scalar]
-    velocity: list[Scalar] | None
+    velocity: list[Scalar] | None = None
     recon: list[Scalar] | None = None
 
 class ModalityInfo(NamedTuple):
@@ -2057,7 +2057,37 @@ class Transfusion(Module):
         text = []
 
         flows = defaultdict(list) # store flows for loss
+
+        # for parsing out the predicted flow from flattened sequence of tokens coming out of transformer
+
         get_pred_flows: GetPredFlows = defaultdict(list) # functions for parsing modalities from Float['b n d'] for model back to latents or pixel space
+
+        def model_to_pred_flow(batch_index, start_index, modality_length, unpack_fn):
+
+            def inner(embed: Float['b n d'], need_splice = True) -> Float['...']:
+                embed = embed[batch_index]
+
+                if need_splice:
+                    embed = embed[start_index:(start_index + modality_length)]
+
+                embed = unpack_fn(embed)
+                return embed
+
+            return inner
+
+        # for going from predicted flow -> reconstruction
+
+        get_recon_losses: Callable[[Tensor], Tensor] = defaultdict(list)
+
+        def get_recon_loss(noise, times, modality):
+
+            def inner(pred_flow):
+                recon_modality = noise + pred_flow * (1. - times)
+                return F.mse_loss(modality, recon_modality)
+
+            return inner
+
+        # go through all modality samples and do necessary transform
 
         for batch_index, batch_modalities in enumerate(modalities):
 
@@ -2147,6 +2177,10 @@ class Transfusion(Module):
 
                     modality_tensor = noised_modality
 
+                    # store function for deriving reconstruction loss from decoder
+
+                    get_recon_losses[modality_type].append(get_recon_loss(noise, modality_time, modality_tensor))
+
                 # go through maybe encoder
 
                 modality_tensor = add_temp_batch_dim(mod.latent_to_model)(modality_tensor)
@@ -2188,19 +2222,6 @@ class Transfusion(Module):
                 # store parsing out back to shape
 
                 modality_tensor, unpack_modality_shape = pack_one_with_inverse(modality_tensor, '* d')
-
-                def model_to_pred_flow(batch_index, start_index, modality_length, unpack_fn):
-
-                    def inner(embed: Float['b n d'], need_splice = True) -> Float['...']:
-                        embed = embed[batch_index]
-
-                        if need_splice:
-                            embed = embed[start_index:(start_index + modality_length)]
-
-                        embed = unpack_fn(embed)
-                        return embed
-
-                    return inner
 
                 inverse_fn = model_to_pred_flow(batch_index, offset + precede_modality_tokens, modality_length, unpack_modality_shape)
 
@@ -2362,19 +2383,30 @@ class Transfusion(Module):
         # flow loss
 
         pred_flows = []
+        recon_losses = []
 
         for modality_id in range(self.num_modalities):
             mod = self.get_modality_info(modality_id)
+
             modality_get_pred_flows = get_pred_flows[modality_id]
+            modality_get_recon_losses = get_recon_losses[modality_id]
 
             modality_pred_flows = []
+            modality_recon_losses = []
 
-            for get_pred_flow in modality_get_pred_flows:
+            for get_pred_flow, get_recon_loss in zip(modality_get_pred_flows, modality_get_recon_losses):
+
                 pred_flow = get_pred_flow(embed)
                 pred_flow = add_temp_batch_dim(mod.model_to_latent)(pred_flow) 
                 modality_pred_flows.append(pred_flow)
 
+                if not return_loss or not self.has_recon_loss:
+                    continue
+
+                modality_recon_losses.append(get_recon_loss(pred_flow))
+
             pred_flows.append(modality_pred_flows)
+            recon_losses.append(modality_recon_losses)
 
         # early return for velocity consistency ema model
 
@@ -2448,7 +2480,7 @@ class Transfusion(Module):
 
             velocity_match_losses = []
 
-            for mod, ema_pred_flow, pred_flow, is_one_modality in zip(self.get_all_modality_info(), ema_pred_flows, pred_flows, is_modalities.unbind(dim = 1)):
+            for ema_pred_flow, pred_flow in zip(ema_pred_flows, pred_flows):
 
                 pack_pattern = 'd *' if mod.channel_first_latent else '* d'
                 pred_flow, _ = pack(pred_flow, pack_pattern)
@@ -2466,9 +2498,23 @@ class Transfusion(Module):
                 (stack(velocity_match_losses) * modality_loss_weights).sum() * self.velocity_consistency_loss_weight
             )
 
+        # maybe reconstruction loss
+
+        if self.has_recon_loss:
+
+            averaged_recon_losses = []
+
+            for modality_recon_loss in recon_losses:
+                averaged_recon_losses.append(sum(modality_recon_loss) / len(modality_recon_loss))
+
+            total_loss = (
+                total_loss +
+                (stack(averaged_recon_losses) * modality_loss_weights).sum() * self.reconstruction_loss_weight
+            )
+
         # return total loss if no breakdown needed
 
         if not return_breakdown:
             return total_loss
 
-        return total_loss, LossBreakdown(total_loss, text_loss, flow_losses, velocity_match_losses)
+        return total_loss, LossBreakdown(total_loss, text_loss, flow_losses, velocity_match_losses, recon_losses)
