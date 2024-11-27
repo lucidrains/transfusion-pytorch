@@ -81,16 +81,15 @@ model = Transfusion(
     num_text_tokens = 256,
     dim_latent = 4,
     channel_first_latent = True,
-    modality_default_shape = (4, 4),
+    modality_default_shape = (8, 8),
     modality_encoder = Encoder(vae),
     modality_decoder = Decoder(vae),
     pre_post_transformer_enc_dec = (
         nn.Conv2d(4, 128, 3, 2, 1),
         nn.ConvTranspose2d(128, 4, 3, 2, 1, output_padding = 1),
     ),
-    add_pos_emb = True,
+    add_pos_emb = False,
     modality_num_dim = 2,
-    velocity_consistency_loss_weight = 0.1,
     reconstruction_loss_weight = 0.1,
     transformer = dict(
         dim = 128,
