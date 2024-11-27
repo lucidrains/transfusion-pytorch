@@ -172,7 +172,7 @@ for step in range(1, 100_000 + 1):
         text_tensor = text_tensor[text_tensor < 256] # todo: offer a utility function for removing meta tags and special tokens
 
         text = decode_tokens(text_tensor)
-        filename = str(results_folder / f'{text}.{step}.png')
+        filename = str(results_folder / f'{step}.{text}.png')
 
         save_image(
             image.detach().cpu(),
