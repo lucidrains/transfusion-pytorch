@@ -21,10 +21,10 @@ results_folder.mkdir(exist_ok = True, parents = True)
 
 # constants
 
-IMAGE_AFTER_TEXT = True
+IMAGE_AFTER_TEXT = True   # False for captioning, True for text-to-image
+USE_PROMPT = False        # whether to use prompting, or synthesize from start token 
 NUM_TRAIN_STEPS = 20_000
-SAMPLE_EVERY = 500
-USE_PROMPT = True
+SAMPLE_EVERY = 250
 CHANNEL_FIRST = True
 
 # functions
@@ -49,7 +49,7 @@ class Decoder(Module):
         if CHANNEL_FIRST:
             x = rearrange(x, 'b d ... -> b ... d')
 
-        x = rearrange(x, '... h w (p1 p2) -> ... 1 (h p1) (w p2)', p1 = 2, p2 = 2, h = 14)
+        x = rearrange(x, '... h w (p1 p2) -> ... 1 (h p1) (w p2)', p1 = 2, p2 = 2)
         return ((x + 1) * 0.5).clamp(min = 0., max = 1.)
 
 model = Transfusion(
@@ -139,11 +139,15 @@ for step in range(1, NUM_TRAIN_STEPS + 1):
 
             if IMAGE_AFTER_TEXT:
 
-                maybe_label = torch.randint(0, 10, ()).cuda()
-                one_multimodal_sample = ema_model.sample(prompt = maybe_label, max_length = 384)
+                text_label = torch.randint(0, 10, ()).cuda()
+                one_multimodal_sample = ema_model.sample(prompt = text_label, max_length = 384)
 
             else:
-                raise NotImplementedError
+
+                rand_batch = next(iter_dl)
+                rand_image = rand_batch[0][0]
+
+                one_multimodal_sample = ema_model.sample(prompt = rand_image, max_length = 384)
 
         # make sure modality sample overall order of modalities look correct
 

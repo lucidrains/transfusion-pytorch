@@ -201,11 +201,11 @@ def concat_contiguous_text(
     """ within a modality sample, any two tensors of type int / long will be concatted together if next to each other, so all text is followed by a modality, and all modality followed by text """
 
     output = []
-    curr_modality = None
 
     for modality in modality_sample:
         if (
             len(output) > 0 and
+            is_tensor(output[-1]) and is_tensor(modality) and
             output[-1].dtype == modality.dtype and
             modality.dtype in (torch.int, torch.long)
         ):
@@ -1365,6 +1365,19 @@ class Transfusion(Module):
     def get_all_modality_info(self) -> list[ModalityInfo]:
         return [self.get_modality_info(i) for i in range(self.num_modalities)]
 
+    def get_modality_shape(
+        self,
+        modality: Float['...'],
+        modality_type: int | None  = None
+    ) -> tuple[int, ...]:
+
+        mod = self.get_modality_info(modality_type)
+
+        if mod.channel_first_latent:
+            modality = rearrange(modality, 'c ... -> ... c')
+
+        return tuple(modality.shape[:-1])
+
     def parameters_without_encoder_decoder(self):
         return (
             set(self.parameters()) -
@@ -1402,7 +1415,7 @@ class Transfusion(Module):
     @typecheck
     def sample(
         self,
-        prompt: ModalitySample | None = None,
+        prompt: ModalitySample | Tensor | tuple[int, Float['...']] | None = None,
         max_length = 2048,
         text_temperature = 1.5,
         text_min_p = 0.1,
@@ -1415,22 +1428,52 @@ class Transfusion(Module):
 
         device = self.device
 
+        # take care of prompt being a raw tensor, either text or raw modality (image, video, actions, latents, etc)
+
+        if is_tensor(prompt) and prompt.dtype == torch.float: # is modality with type 0 implicit
+            prompt = (0, prompt)
+
+        if is_tensor(prompt) and prompt.dtype in (torch.int, torch.long): # is text only prompt
+            prompt = [prompt]
+
+        elif isinstance(prompt, tuple):
+            modality_type, modality = prompt
+
+            mod = self.get_modality_info(modality_type)
+
+            if exists(mod.encoder):
+                with torch.no_grad():
+                    mod.encoder.eval()
+                    modality = self.maybe_add_temp_batch_dim(mod.encoder)(modality).detach()
+
+            modality_shape_tuple = self.get_modality_shape(modality, modality_type)
+            modality_shape_str = join([*map(str, modality_shape_tuple)], ',')
+            modality_meta_info = self.char_tokenizer(modality_shape_str, device = device)
+
+            prompt = [
+                tensor([self.meta_id]),
+                modality_meta_info,
+                tensor([mod.som_id]),
+                (modality_type, modality),
+                tensor([mod.eom_id]),
+            ]
+
+        # sos
+
         init_text_seq = tensor([self.sos_id], device = device)
 
         # just take care of prompt being zero dimensions
-
-        prompt = tree_map_tensor(prompt, lambda t: rearrange(t, '-> 1') if t.ndim == 0 else t)
 
         modality_sample = [init_text_seq, *default(prompt, [])]
 
         # take care of moving to device
 
         modality_sample = tree_map_tensor(modality_sample, lambda t: t.to(device))
+        modality_sample = tree_map_tensor(modality_sample, lambda t: rearrange(t, '-> 1') if t.ndim == 0 else t)
 
         modality_sample = concat_contiguous_text(modality_sample)
 
         *_, last_modality_sample = modality_sample
-        assert last_modality_sample.dtype in (torch.int, torch.long), 'prompt must be text tokens'
 
         curr_length = 0
         curr_modality_id = None
