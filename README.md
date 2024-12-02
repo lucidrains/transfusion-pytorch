@@ -234,3 +234,12 @@ sampled = model.generate_text_only(text[:, :1], 1024)
     url     = {https://api.semanticscholar.org/CorpusID:273532030}
 }
 ```
+
+```bibtex
+@inproceedings{Duvvuri2024LASERAW,
+    title   = {LASER: Attention with Exponential Transformation},
+    author  = {Sai Surya Duvvuri and Inderjit S. Dhillon},
+    year    = {2024},
+    url     = {https://api.semanticscholar.org/CorpusID:273849947}
+}
+```
