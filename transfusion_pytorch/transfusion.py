@@ -756,6 +756,7 @@ class Attention(Module):
         softcap_value = 50.,
         use_flex_attn = False,
         gate_values = True,
+        laser = False,
         learned_value_residual_mix = False
     ):
         super().__init__()
@@ -782,6 +783,8 @@ class Attention(Module):
         ) if gate_values else None
 
         self.softcap_value = softcap_value
+
+        self.laser = laser
 
         self.dropout = nn.Dropout(dropout)
 
@@ -844,6 +847,12 @@ class Attention(Module):
         if exists(rotary_emb):
             q, k = tuple(apply_rotary_emb(rotary_emb, t, freqs_seq_dim = -2) for t in (q, k))
 
+        # laser attention
+
+        if self.laser:
+            v_max = v.amax(dim = -1, keepdim = True).detach()
+            v = (v - v_max).exp()
+
         # whether to use flex attention or not
 
         if should_use_flex_attn:
@@ -878,6 +887,11 @@ class Attention(Module):
 
             out = einsum(attn, v, 'b h i j, b h j d -> b h i d')
 
+        # laser attention
+
+        if self.laser:
+            out = log(out) + v_max
+
         # maybe gate values
 
         if exists(self.to_gates):
@@ -908,6 +922,7 @@ class Transformer(Module):
         ff_expansion_factor = 4,
         attn_kwargs: dict = dict(),
         ff_kwargs: dict = dict(),
+        attn_laser = False,
         unet_skips = True,
         use_flex_attn = False
     ):
@@ -932,7 +947,7 @@ class Transformer(Module):
 
             skip_proj = Linear(dim * 2, dim, bias = False) if is_latter_half and unet_skips else None
 
-            attn = Attention(dim = dim, dim_head = dim_head, heads = heads, dropout = dropout, use_flex_attn = use_flex_attn, learned_value_residual_mix = not is_first, **attn_kwargs)
+            attn = Attention(dim = dim, dim_head = dim_head, heads = heads, dropout = dropout, use_flex_attn = use_flex_attn, learned_value_residual_mix = not is_first, laser = attn_laser, **attn_kwargs)
 
             ff = FeedForward(dim = dim, expansion_factor = ff_expansion_factor, **ff_kwargs)
 

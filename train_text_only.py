@@ -50,7 +50,8 @@ model = Transfusion(
         dim = 384,
         depth = 8,
         dim_head = 64,
-        heads = 8
+        heads = 8,
+        attn_laser = True
     )
 ).cuda()
 
