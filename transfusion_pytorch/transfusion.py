@@ -195,6 +195,28 @@ def default_modality_length_to_time_fn(num_modalities: Int['b']) -> Float['b m']
 
 # pretty print
 
+def concat_contiguous_text(
+    modality_sample: ModalitySample
+) -> ModalitySample:
+    """ within a modality sample, any two tensors of type int / long will be concatted together if next to each other, so all text is followed by a modality, and all modality followed by text """
+
+    output = []
+    curr_modality = None
+
+    for modality in modality_sample:
+        if (
+            len(output) > 0 and
+            output[-1].dtype == modality.dtype and
+            modality.dtype in (torch.int, torch.long)
+        ):
+            packed_text, _ = pack((output[-1], modality), '*')
+            output[-1] = packed_text
+
+        else:
+            output.append(modality)
+
+    return output
+
 def print_modality_sample(
     modality_sample: ModalitySample
 ):
@@ -1394,12 +1416,18 @@ class Transfusion(Module):
         device = self.device
 
         init_text_seq = tensor([self.sos_id], device = device)
+
+        # just take care of prompt being zero dimensions
+
+        prompt = tree_map_tensor(prompt, lambda t: rearrange(t, '-> 1') if t.ndim == 0 else t)
+
         modality_sample = [init_text_seq, *default(prompt, [])]
 
         # take care of moving to device
 
         modality_sample = tree_map_tensor(modality_sample, lambda t: t.to(device))
-        modality_sample = tree_map_tensor(modality_sample, lambda t: rearrange(t, '-> 1') if t.ndim == 0 else t)
+
+        modality_sample = concat_contiguous_text(modality_sample)
 
         *_, last_modality_sample = modality_sample
         assert last_modality_sample.dtype in (torch.int, torch.long), 'prompt must be text tokens'

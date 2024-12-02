@@ -13,7 +13,7 @@ import torchvision
 import torchvision.transforms as T
 from torchvision.utils import save_image
 
-from transfusion_pytorch import Transfusion, print_modality_sample
+from transfusion_pytorch.transfusion import Transfusion, print_modality_sample
 
 rmtree('./results', ignore_errors = True)
 results_folder = Path('./results')
@@ -24,6 +24,7 @@ results_folder.mkdir(exist_ok = True, parents = True)
 IMAGE_AFTER_TEXT = True
 NUM_TRAIN_STEPS = 20_000
 SAMPLE_EVERY = 500
+USE_PROMPT = True
 CHANNEL_FIRST = True
 
 # functions
@@ -127,7 +128,24 @@ for step in range(1, NUM_TRAIN_STEPS + 1):
     # eval
 
     if divisible_by(step, SAMPLE_EVERY):
-        one_multimodal_sample = ema_model.sample(max_length = 384)
+
+        if not USE_PROMPT:
+            # sampling from start to finish
+
+            one_multimodal_sample = ema_model.sample(max_length = 384)
+        else:
+            # sampling using prompt
+            # which differs depending on which comes first, text or images
+
+            if IMAGE_AFTER_TEXT:
+
+                maybe_label = torch.randint(0, 10, ()).cuda()
+                one_multimodal_sample = ema_model.sample(prompt = maybe_label, max_length = 384)
+
+            else:
+                raise NotImplementedError
+
+        # make sure modality sample overall order of modalities look correct
 
         print_modality_sample(one_multimodal_sample)
 
