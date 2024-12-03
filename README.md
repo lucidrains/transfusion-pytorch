@@ -155,17 +155,6 @@ loss.backward()
 sampled = model.generate_text_only(text[:, :1], 1024)
 ```
 
-## Todo
-
-- [ ] use N-dimensional alibi with flex attention (configure for only certain amount of heads) for relative positions for any modality
-- [ ] test out modality only training on oxford flowers
-- [ ] given findings in pi-zero robotics foundation model, add mixture of experts for both attention and feedforward as options
-- [ ] able to turn off meta information and use fixed shape per modality
-- [ ] make kv caching work during sampling and add tests
-- [ ] add down/up sampling unets with skip connections, customizable per modality, with attention in the middle, as in simple diffusion paper
-- [ ] allow for rotary positions to be turned on for 1d modalities, so transfusion can be used for action generation across time
-- [ ] add a debug mode behind environment flag for preemptive shape error messages
-
 ## Citations
 
 ```bibtex
