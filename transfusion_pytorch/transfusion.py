@@ -757,6 +757,7 @@ class Attention(Module):
         use_flex_attn = False,
         gate_values = True,
         laser = False,
+        laser_softclamp_value = 15.,
         learned_value_residual_mix = False
     ):
         super().__init__()
@@ -785,6 +786,7 @@ class Attention(Module):
         self.softcap_value = softcap_value
 
         self.laser = laser
+        self.laser_softclamp_value = laser_softclamp_value
 
         self.dropout = nn.Dropout(dropout)
 
@@ -850,8 +852,8 @@ class Attention(Module):
         # laser attention
 
         if self.laser:
-            v_max = v.amax(dim = -2, keepdim = True).detach()
-            v = (v - v_max).exp()
+            v = softclamp(v, self.laser_softclamp_value)
+            v = v.exp()
 
         # whether to use flex attention or not
 
@@ -890,7 +892,7 @@ class Attention(Module):
         # laser attention
 
         if self.laser:
-            out = log(out) + v_max
+            out = log(out)
 
         # maybe gate values
 

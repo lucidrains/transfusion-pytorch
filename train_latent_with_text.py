@@ -95,7 +95,7 @@ model = Transfusion(
         dim = 128,
         depth = 8,
         dim_head = 64,
-        heads = 8
+        heads = 8,
     )
 ).cuda()
 
