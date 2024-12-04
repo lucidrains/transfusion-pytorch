@@ -232,3 +232,12 @@ sampled = model.generate_text_only(text[:, :1], 1024)
     url     = {https://api.semanticscholar.org/CorpusID:273849947}
 }
 ```
+
+```bibtex
+@inproceedings{Dong2024HymbaAH,
+    title   = {Hymba: A Hybrid-head Architecture for Small Language Models},
+    author  = {Xin Dong and Y. Fu and Shizhe Diao and Wonmin Byeon and Zijia Chen and Ameya Mahabaleshwarkar and Shih-Yang Liu and Matthijs Van Keirsbilck and Min-Hung Chen and Yoshi Suhara and Yingyan Lin and Jan Kautz and Pavlo Molchanov},
+    year    = {2024},
+    url     = {https://api.semanticscholar.org/CorpusID:274166163}
+}
+```

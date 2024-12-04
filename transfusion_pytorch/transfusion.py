@@ -147,6 +147,15 @@ def add_temp_batch_dim(fn: Callable):
         return out
     return inner
 
+def pack_with_inverse(t, pattern):
+    packed, packed_shape = pack(t, pattern)
+
+    def inverse(out, inv_pattern = None):
+        inv_pattern = default(inv_pattern, pattern)
+        return unpack(out, packed_shape, inv_pattern)
+
+    return packed, inverse
+
 def pack_one_with_inverse(t, pattern):
     packed, packed_shape = pack([t], pattern)
 
@@ -1115,6 +1124,7 @@ class Transfusion(Module):
         self,
         *,
         num_text_tokens,
+        num_register_tokens = 16,
         transformer: dict | Transformer,
         dim_latent: int | tuple[int, ...] | None = None,
         channel_first_latent: bool | tuple[bool, ...] = False,
@@ -1297,6 +1307,11 @@ class Transfusion(Module):
 
         self.latent_to_model_projs = ModuleList(latent_to_model_projs)
         self.model_to_latent_projs = ModuleList(model_to_latent_projs)
+
+        # maybe register tokens (used in hymba, renamed from "meta" to register as "meta" was reserved from above already for the modality meta tag)
+
+        self.register_tokens = nn.Parameter(torch.zeros(num_register_tokens, dim))
+        nn.init.normal_(self.register_tokens, std = 0.02)
 
         # relative positions
 
@@ -2392,6 +2407,7 @@ class Transfusion(Module):
         if modality_positions.numel() == 0:
             modality_positions = F.pad(modality_positions, (0, 0, 0, 1))
 
+
         # sort the modalities tensor and sanitize, readying for noising of modalities
 
         modality_positions, sorted_indices = order_modality_positions_by_seq_offset(modality_positions)
@@ -2414,6 +2430,18 @@ class Transfusion(Module):
         # intersperse the modalities with the text for the joint transformer + flow system
 
         tokens = einx.where('b n, b n d, b n d', is_any_modality, modality_tokens, text_tokens)
+
+        # handle maybe meta / register tokens
+
+        register_tokens = repeat(self.register_tokens, '... -> b ...', b = batch)
+
+        num_register_tokens = register_tokens.shape[-2]
+        seq_len += num_register_tokens
+
+        tokens, unpack_register_tokens = pack_with_inverse((register_tokens, tokens), 'b * d')
+        modality_positions[..., 1] += num_register_tokens
+
+        is_modalities = F.pad(is_modalities, (num_register_tokens, 0), value = False)
 
         # derive rotary positions
 
@@ -2454,6 +2482,10 @@ class Transfusion(Module):
             decode_length = decode_length,
             return_kv_cache = True
         )
+
+        # remove register tokens
+
+        _, embed = unpack_register_tokens(embed)
 
         # early return for embedding for decoding modality
 
