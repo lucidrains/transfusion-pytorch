@@ -118,6 +118,11 @@ def default(v, d):
 def identity(t):
     return t
 
+def always(val):
+    def inner(*args, **kwargs):
+        return val
+    return inner
+
 def first(it):
     return it[0]
 
@@ -776,7 +781,7 @@ class Attention(Module):
             nn.Linear(dim, heads),
             nn.Sigmoid(),
             Rearrange('b n h -> b h n 1') # add head dimension
-        ) if learned_value_residual_mix else (lambda _: 0.5)
+        ) if learned_value_residual_mix else always(0.5)
 
         self.to_gates = nn.Sequential(
             nn.Linear(dim, heads, bias = False),
