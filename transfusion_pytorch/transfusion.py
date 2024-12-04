@@ -2483,9 +2483,10 @@ class Transfusion(Module):
             return_kv_cache = True
         )
 
-        # remove register tokens
+        if not exists(decode_length):
+            # remove register tokens
 
-        _, embed = unpack_register_tokens(embed)
+            _, embed = unpack_register_tokens(embed)
 
         # early return for embedding for decoding modality
 
