@@ -11,6 +11,7 @@ d - dimension
 l - logits (text)
 i, j - sequence (row, col)
 p - positions
+s - residual streams
 """
 
 import os
