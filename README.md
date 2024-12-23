@@ -239,5 +239,15 @@ sampled = model.generate_text_only(text[:, :1], 1024)
     author  = {Xin Dong and Y. Fu and Shizhe Diao and Wonmin Byeon and Zijia Chen and Ameya Mahabaleshwarkar and Shih-Yang Liu and Matthijs Van Keirsbilck and Min-Hung Chen and Yoshi Suhara and Yingyan Lin and Jan Kautz and Pavlo Molchanov},
     year    = {2024},
     url     = {https://api.semanticscholar.org/CorpusID:274166163}
+```
+
+```bibtex
+@article{Zhu2024HyperConnections,
+    title   = {Hyper-Connections},
+    author  = {Defa Zhu and Hongzhi Huang and Zihao Huang and Yutao Zeng and Yunyao Mao and Banggu Wu and Qiyang Min and Xun Zhou},
+    journal = {ArXiv},
+    year    = {2024},
+    volume  = {abs/2409.19606},
+    url     = {https://api.semanticscholar.org/CorpusID:272987528}
 }
 ```

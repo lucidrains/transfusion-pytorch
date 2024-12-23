@@ -20,10 +20,12 @@ from transfusion_pytorch.transfusion import (
 
 @pytest.mark.parametrize('cache_kv', (False, True))
 @pytest.mark.parametrize('use_flex_attn', (False, True))
+@pytest.mark.parametrize('num_residual_streams', (1, 4))
 @pytest.mark.parametrize('reconstruction_loss_weight', (0., 0.1))
 def test_transfusion(
     cache_kv: bool,
     use_flex_attn: bool,
+    num_residual_streams: int,
     reconstruction_loss_weight: float
 ):
 
@@ -41,7 +43,8 @@ def test_transfusion(
         transformer = dict(
             dim = 64,
             depth = 2,
-            use_flex_attn = use_flex_attn
+            use_flex_attn = use_flex_attn,
+            num_residual_streams = num_residual_streams
         )
     )
 
