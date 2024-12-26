@@ -42,6 +42,8 @@ from ema_pytorch import EMA
 
 from rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
 
+from hyper_connections import HyperConnections
+
 from tqdm import tqdm
 from loguru import logger
 
@@ -594,97 +596,6 @@ class RandomFourierEmbed(Module):
         fourier_embed, _ = pack((times, freqs.sin(), freqs.cos()), 'b n *')
         return fourier_embed
 
-# hyper connections - multiple residual streams
-
-class Residual(Module):
-    def __init__(self, **kwargs):
-        super().__init__()
-
-    def prepare_with_inverse(self, residuals):
-        branch_input, residuals, residual_kwargs = self.prepare(residuals)
-
-        def inverse(branch_out):
-            return self(branch_out, residuals, **residual_kwargs)
-
-        return branch_input, inverse
-
-    def prepare(self, residuals):
-        return residuals, residuals, dict()
-
-    def forward(self, branch_out, residuals, **kwargs):
-        return branch_out + residuals
-
-class HyperConnections(Module):
-    def __init__(
-        self,
-        dim,
-        *,
-        num_residual_streams,
-        layer_index = None,
-        tanh = True,
-        **kwargs
-    ):
-        """
-        https://arxiv.org/abs/2409.19606
-        Appendix J - Algorithm 2, Dynamic only
-        """
-        super().__init__()
-
-        self.act = nn.Tanh() if tanh else nn.Identity()
-
-        self.norm = nn.RMSNorm(dim)
-
-        self.num_residual_streams = num_residual_streams
-        layer_index = default(layer_index, randrange(num_residual_streams)) # just choose one random residual stream if layer index not given
-
-        self.static_beta = nn.Parameter(torch.ones(num_residual_streams))
-
-        init_alpha0 = torch.zeros((num_residual_streams, 1))
-        init_alpha0[layer_index % num_residual_streams, 0] = 1.
-
-        self.static_alpha = nn.Parameter(torch.cat([init_alpha0, torch.eye(num_residual_streams)], dim = 1))
-
-        self.dynamic_alpha_fn = nn.Parameter(torch.zeros(dim, num_residual_streams + 1))
-        self.dynamic_alpha_scale = nn.Parameter(torch.ones(()) * 1e-2)
-        self.dynamic_beta_fn = nn.Parameter(torch.zeros(dim))
-        self.dynamic_beta_scale = nn.Parameter(torch.ones(()) * 1e-2)
-
-    def prepare_with_inverse(self, residuals):
-        branch_input, residuals, residual_kwargs = self.prepare(residuals)
-
-        def inverse(branch_out):
-            return self(branch_out, residuals, **residual_kwargs)
-
-        return branch_input, inverse
-
-    def prepare(self, residuals):
-
-        residuals = rearrange(residuals, '(b s) n d -> b n s d', s = self.num_residual_streams)
-
-        normed = self.norm(residuals)
-
-        wc_weight = self.act(normed @ self.dynamic_alpha_fn)
-        dynamic_alpha = wc_weight * self.dynamic_alpha_scale
-        alpha = dynamic_alpha + self.static_alpha
-
-        dc_weight = self.act(normed @ self.dynamic_beta_fn)
-        dynamic_beta = dc_weight * self.dynamic_beta_scale
-        beta = dynamic_beta + self.static_beta
-
-        # width connection
-
-        mix_h = einsum(alpha, residuals, '... s t, ... s d -> ... t d')
-
-        branch_input, residuals = mix_h[..., 0, :], mix_h[..., 1:, :]
-
-        return branch_input, residuals, dict(beta = beta)
-
-    def forward(self, branch_output, residuals, *, beta):
-        # 'depth' connection
-
-        residuals = einsum(branch_output, beta, 'b n d, b n s -> b n s d') + residuals
-        return rearrange(residuals, 'b n s d -> (b s) n d')
-
 # adaptive layernorm and ada-ln zero rolled into one wrapper
 # from DiT paper and sota for time conditioning for now
 
@@ -1056,7 +967,8 @@ class Transformer(Module):
         self.num_residual_streams = num_residual_streams
 
         counter = count()
-        residual_klass = Residual if num_residual_streams == 1 else HyperConnections
+
+        init_residual_fn, self.expand_stream, self.reduce_stream = HyperConnections.get_init_and_expand_reduce_stream_functions(num_residual_streams, disable = num_residual_streams == 1)
 
         # layers
 
@@ -1076,8 +988,8 @@ class Transformer(Module):
             attn = AdaptiveWrapper(attn, dim = dim, dim_cond = dim * 4)
             ff = AdaptiveWrapper(ff, dim = dim, dim_cond = dim * 4)
 
-            attn_residual = residual_klass(dim = dim, num_residual_streams = num_residual_streams, layer_id = next(counter))
-            ff_residual = residual_klass(dim = dim, num_residual_streams = num_residual_streams, layer_id = next(counter))
+            attn_residual = init_residual_fn(dim = dim, layer_index = next(counter))
+            ff_residual = init_residual_fn(dim = dim, layer_index = next(counter))
 
             layers.append(ModuleList([skip_proj, attn, attn_residual, ff, ff_residual]))
 
@@ -1171,8 +1083,7 @@ class Transformer(Module):
 
         # expand input into multiple residual streams for maybe hyper connection
 
-        if self.num_residual_streams > 1:
-            x = repeat(x, 'b ... -> (b s) ...', s = self.num_residual_streams)
+        x = self.expand_stream(x)
 
         # transformer layers as usual, using mask from above
 
@@ -1203,7 +1114,7 @@ class Transformer(Module):
 
             # attention and feedforward
 
-            x, add_attn_residual = attn_residual.prepare_with_inverse(x)
+            x, add_attn_residual = attn_residual(x)
 
             (attn_out, attn_values), kv_cache = attn(
                 x,
@@ -1222,7 +1133,7 @@ class Transformer(Module):
 
             x = add_attn_residual(attn_out)
 
-            x, add_ff_residual = ff_residual.prepare_with_inverse(x)
+            x, add_ff_residual = ff_residual(x)
 
             ff_out = ff(x, **adaptive_kwargs)
 
@@ -1230,8 +1141,7 @@ class Transformer(Module):
 
         # reduce multiple residual streams for maybe hyper connection
 
-        if self.num_residual_streams > 1:
-            x = reduce(x, '(b s) ... -> b ...', 'sum', s = self.num_residual_streams)
+        x = self.reduce_stream(x)
 
         assert len(skips) == 0
 
