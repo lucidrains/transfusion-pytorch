@@ -946,7 +946,7 @@ class Transformer(Module):
         attn_laser = False,
         unet_skips = True,
         use_flex_attn = False,
-        num_residual_streams = 1
+        num_residual_streams = 4
     ):
         super().__init__()
         self.use_flex_attn = use_flex_attn
@@ -1160,7 +1160,6 @@ class Transfusion(Module):
         self,
         *,
         num_text_tokens,
-        num_register_tokens = 16,
         transformer: dict | Transformer,
         dim_latent: int | tuple[int, ...] | None = None,
         channel_first_latent: bool | tuple[bool, ...] = False,
@@ -1343,11 +1342,6 @@ class Transfusion(Module):
 
         self.latent_to_model_projs = ModuleList(latent_to_model_projs)
         self.model_to_latent_projs = ModuleList(model_to_latent_projs)
-
-        # maybe register tokens (used in hymba, renamed from "meta" to register as "meta" was reserved from above already for the modality meta tag)
-
-        self.register_tokens = nn.Parameter(torch.zeros(num_register_tokens, dim))
-        nn.init.normal_(self.register_tokens, std = 0.02)
 
         # relative positions
 
@@ -2467,18 +2461,6 @@ class Transfusion(Module):
 
         tokens = einx.where('b n, b n d, b n d', is_any_modality, modality_tokens, text_tokens)
 
-        # handle maybe meta / register tokens
-
-        register_tokens = repeat(self.register_tokens, '... -> b ...', b = batch)
-
-        num_register_tokens = register_tokens.shape[-2]
-        seq_len += num_register_tokens
-
-        tokens, unpack_register_tokens = pack_with_inverse((register_tokens, tokens), 'b * d')
-        modality_positions[..., 1] += num_register_tokens
-
-        is_modalities = F.pad(is_modalities, (num_register_tokens, 0), value = False)
-
         # derive rotary positions
 
         rotary_positions = derive_rotary_positions_from_modality_positions(seq_len, modality_positions)
@@ -2518,11 +2500,6 @@ class Transfusion(Module):
             decode_length = decode_length,
             return_kv_cache = True
         )
-
-        if not exists(decode_length):
-            # remove register tokens
-
-            _, embed = unpack_register_tokens(embed)
 
         # early return for embedding for decoding modality
 
