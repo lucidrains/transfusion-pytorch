@@ -1,6 +1,6 @@
 [project]
 name = "transfusion-pytorch"
-version = "0.8.0"
+version = "0.9.0"
 description = "Transfusion in Pytorch"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }
@@ -24,6 +24,7 @@ classifiers=[
   ]
 
 dependencies = [
+    'axial-positional-embedding>=0.3.3',
     'beartype',
     'einx>=0.3.0',
     'einops>=0.8.0',

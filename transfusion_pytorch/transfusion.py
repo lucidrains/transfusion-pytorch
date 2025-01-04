@@ -40,6 +40,8 @@ from einops import rearrange, repeat, reduce, einsum, pack, unpack
 
 from ema_pytorch import EMA
 
+from axial_positional_embedding import ContinuousAxialPositionalEmbedding
+
 from rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
 
 from hyper_connections import HyperConnections
@@ -533,12 +535,10 @@ class MLPAxialPositions(Module):
         self.num_dimensions = num_dimensions
         dim_hidden = int(dim * expand_factor)
 
-        self.mlp = nn.Sequential(
-            nn.Linear(num_dimensions, dim),
-            nn.SiLU(),
-            nn.Linear(dim, dim_hidden),
-            nn.SiLU(),
-            nn.Linear(dim_hidden, dim)
+        self.axial_pos_emb = ContinuousAxialPositionalEmbedding(
+            dim = dim,
+            num_axial_dims = num_dimensions,
+            mlp_expansion = expand_factor
         )
 
         # tensor typing
@@ -562,12 +562,9 @@ class MLPAxialPositions(Module):
         modality_shape = modality_shape.to(self.device)
 
         assert len(modality_shape) == self.num_dimensions
-        dimensions = modality_shape.tolist()
+        dimensions = tuple(modality_shape.tolist())
 
-        grid = torch.meshgrid([torch.arange(dim_len, device = self.device) for dim_len in dimensions], indexing = 'ij')
-        axial_positions = stack(grid, dim = -1)
-
-        pos_emb = self.mlp(axial_positions.float())
+        pos_emb = self.axial_pos_emb(dimensions)
 
         if flatten_dims:
             pos_emb = rearrange(pos_emb, '... d -> (...) d')
