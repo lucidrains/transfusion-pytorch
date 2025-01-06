@@ -521,45 +521,6 @@ def min_p_filter(logits, min_p = 0.1):
     limit = min_p * max_probs
     return torch.where(probs < limit, float('-inf'), logits)
 
-# MLP parameterized N-dimensional positions
-
-class MLPAxialPositions(Module):
-    def __init__(
-        self,
-        *,
-        num_dimensions, # 2 for images, 3 for video, etc etc
-        dim,
-        expand_factor = 2.
-    ):
-        super().__init__()
-        self.axial_pos_emb = ContinuousAxialPositionalEmbedding(
-            dim = dim,
-            num_axial_dims = num_dimensions,
-            mlp_expansion = expand_factor
-        )
-
-        # tensor typing
-
-        self._d = dim
-
-    @property
-    def device(self):
-        return next(self.parameters()).device
-
-    @typecheck
-    def forward(
-        self,
-        modality_shape: Int['p'] | torch.Size,
-        flatten_dims = False
-    ) -> Float['... {self._d}']:
-
-        pos_emb = self.axial_pos_emb(modality_shape)
-
-        if flatten_dims:
-            pos_emb = rearrange(pos_emb, '... d -> (...) d')
-
-        return pos_emb
-
 # random fourier embedding
 
 class RandomFourierEmbed(Module):
@@ -1222,9 +1183,9 @@ class Transfusion(Module):
 
             assert exists(modality_ndim), '`modality_num_dim` must be set if you wish to automatically inject axial positional embeddings'
 
-            pos_generating_mlp = MLPAxialPositions(
+            pos_generating_mlp = ContinuousAxialPositionalEmbedding(
                 dim = dim,
-                num_dimensions = modality_ndim,
+                num_axial_dims = modality_ndim,
             )
 
             self.pos_emb_mlp.append(pos_generating_mlp)
@@ -1909,7 +1870,7 @@ class Transfusion(Module):
         # maybe add axial pos emb
 
         if mod.add_pos_emb:
-            axial_pos_emb = mod.pos_emb_mlp(tensor(axial_dims), flatten_dims = True)
+            axial_pos_emb = mod.pos_emb_mlp(tensor(axial_dims), flatten = True)
             noised_tokens = noised_tokens + axial_pos_emb
 
         # attention
@@ -2365,7 +2326,7 @@ class Transfusion(Module):
                 if need_axial_pos_emb:
 
                     if exists(mod.pos_emb_mlp):
-                        pos_emb = mod.pos_emb_mlp(tensor(modality_shape_tuple), flatten_dims= True)
+                        pos_emb = mod.pos_emb_mlp(tensor(modality_shape_tuple), flatten = True)
 
                         pos_emb = F.pad(pos_emb, (0, 0, precede_modality_tokens, succeed_modality_tokens), value = 0.)
                     else:
