@@ -2172,6 +2172,10 @@ class Transfusion(Module):
 
             return inner
 
+        # prepare storing of sizes of all modalities that require axial positions, for delayed application for efficiency
+
+        pos_emb_max_axial_dims: dict[int, list[Tensor]] = defaultdict(list)
+
         # go through all modality samples and do necessary transform
 
         for batch_index, batch_modalities in enumerate(modalities):
@@ -2326,9 +2330,9 @@ class Transfusion(Module):
                 if need_axial_pos_emb:
 
                     if exists(mod.pos_emb_mlp):
-                        pos_emb = mod.pos_emb_mlp(tensor(modality_shape_tuple), flatten = True)
+                        pos_emb_max_axial_dims[modality_type].append(tensor(modality_shape_tuple))
+                        pos_emb = (modality_type, modality_shape_tuple, (precede_modality_tokens, succeed_modality_tokens))
 
-                        pos_emb = F.pad(pos_emb, (0, 0, precede_modality_tokens, succeed_modality_tokens), value = 0.)
                     else:
                         pos_emb = torch.zeros(text_tensor.shape[0], self.dim, device = device)
 
@@ -2337,7 +2341,7 @@ class Transfusion(Module):
             text.append(cat(batch_text))
 
             if need_axial_pos_emb:
-                modality_pos_emb.append(cat(batch_modality_pos_emb, dim = -2))
+                modality_pos_emb.append(batch_modality_pos_emb)
 
             modality_tokens.append(cat(batch_modality_tokens))
             modality_positions.append(batch_modality_positions)
@@ -2351,8 +2355,38 @@ class Transfusion(Module):
 
         modality_tokens = pad_sequence(modality_tokens, padding_value = 0.)
 
+        # handle modality positional embedding
+
         if need_axial_pos_emb:
-            modality_pos_emb = pad_sequence(modality_pos_emb, padding_value = 0.)
+            pos_emb_max_axial_dims = {mod_type: stack(sizes, dim = -1).amax(dim = -1) for mod_type, sizes in pos_emb_max_axial_dims.items()}
+            factorized_pos_emb = {mod_type: self.get_modality_info(mod_type).pos_emb_mlp(max_size, return_factorized = True) for mod_type, max_size in pos_emb_max_axial_dims.items()}
+
+            # lazy evaluate the modality positional embedding from the factorized positional embedding from maximum axial dims
+
+            evaluated_pos_emb = []
+
+            for batch_modality_pos_emb in modality_pos_emb:
+                evaluated_batch_pos_emb = []
+
+                for maybe_pos_emb_config in batch_modality_pos_emb:
+
+                    if is_tensor(maybe_pos_emb_config):
+                        evaluated_batch_pos_emb.append(maybe_pos_emb_config)
+                        continue
+
+                    mod_type, mod_size, padding = maybe_pos_emb_config
+
+                    mod_info = self.get_modality_info(mod_type)
+                    mod_factorized_pos_emb = factorized_pos_emb[mod_type]
+
+                    mod_pos_emb = mod_info.pos_emb_mlp.combine_factorized(mod_factorized_pos_emb, mod_size, flatten = True)
+                    mod_pos_emb = F.pad(mod_pos_emb, (0, 0, *padding), value = 0.) # handle padding for preceding and succeeding meta tokens
+
+                    evaluated_batch_pos_emb.append(mod_pos_emb)
+
+                evaluated_pos_emb.append(cat(evaluated_batch_pos_emb, dim = -2))
+
+            modality_pos_emb = pad_sequence(evaluated_pos_emb, padding_value = 0.)
 
         # handle training mode and removal of last token
 
@@ -2383,7 +2417,6 @@ class Transfusion(Module):
 
         if modality_positions.numel() == 0:
             modality_positions = F.pad(modality_positions, (0, 0, 0, 1))
-
 
         # sort the modalities tensor and sanitize, readying for noising of modalities
 
