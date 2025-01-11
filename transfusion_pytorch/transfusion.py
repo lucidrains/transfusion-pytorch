@@ -1217,6 +1217,10 @@ class Transfusion(Module):
 
         self.fallback_to_default_shape_if_invalid = fallback_to_default_shape_if_invalid
 
+        # store number of text tokens
+
+        self.num_text_tokens = num_text_tokens
+
         # entire "sentence" start and end id
 
         num_text_special_ids = 2
@@ -1441,6 +1445,13 @@ class Transfusion(Module):
     ) -> ModalitySample:
 
         device = self.device
+
+        # handle edge case where there are no text tokens
+
+        if self.num_text_tokens == 0:
+            logger.warning(f'you have `num_text_tokens` set to 0, so `sample` will be forwarded to `generate_modality_only(batch_size: int, modality_type: int)` method')
+
+            return self.generate_modality_only(batch_size = 1)
 
         # take care of prompt being a raw tensor, either text or raw modality (image, video, actions, latents, etc)
 
