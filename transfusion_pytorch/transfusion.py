@@ -984,7 +984,7 @@ class Transformer(Module):
         if needs_masking:
             if causal_mask:
                 if should_use_flex_attn:
-                    block_mask = create_block_mask(causal, B = None, H = None, Q_LEN = seq_len, KV_LEN = seq_len, device = device)
+                    block_mask = create_block_mask(causal, B = None, H = None, Q_LEN = seq_len, KV_LEN = seq_len, _compile = True, device = device)
                     attn_mask_kwargs.update(block_mask = block_mask)
                 else:
                     attn_mask_kwargs.update(causal = True)
@@ -994,7 +994,7 @@ class Transformer(Module):
 
                 if should_use_flex_attn:
                     transfusion_mask_fn = transfusion_attn_mask(modality_positions)
-                    block_mask = create_block_mask(transfusion_mask_fn, B = None, H = None, Q_LEN = seq_len, KV_LEN = seq_len, device = device)
+                    block_mask = create_block_mask(transfusion_mask_fn, B = None, H = None, Q_LEN = seq_len, KV_LEN = seq_len, _compile = True, device = device)
                     attn_mask_kwargs.update(block_mask = block_mask)
                 else:
                     attn_mask = naive_attn_mask(seq_len, modality_positions, device = device)
