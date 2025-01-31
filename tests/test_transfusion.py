@@ -15,7 +15,8 @@ cuda_available = cuda.is_available()
 from transfusion_pytorch.transfusion import (
     Transfusion,
     flex_attention,
-    exists
+    exists,
+    stack_same_shape_tensors_with_inverse
 )
 
 @pytest.mark.parametrize('cache_kv', (False, True))
@@ -330,3 +331,29 @@ def test_modality_only_with_unet():
     loss.backward()
 
     sampled = model.generate_modality_only()
+
+def test_stack_similar_shape_fn():
+    from torch import zeros
+
+    data = [
+        zeros(3, 5),
+        zeros(2, 3),
+        zeros(3, 5),
+        zeros(2, 3),
+        zeros(4, 5),
+        zeros(4, 5)
+    ]
+
+    plus_one = lambda x: x + 1
+
+    data = [d + i for i, d in enumerate(data)]
+    data_plus_one = [plus_one(d) for d in data]
+
+    stacked_tensors, inverse = stack_same_shape_tensors_with_inverse(data)
+
+    stacked_tensors = {k: plus_one(v) for k, v in stacked_tensors.items()}
+
+    batch_processed_data_plus_one = inverse(stacked_tensors)
+
+    assert all([torch.allclose(tensor1, tensor2) for tensor1, tensor2 in zip(data_plus_one, batch_processed_data_plus_one)])
+

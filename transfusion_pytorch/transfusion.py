@@ -510,6 +510,47 @@ def naive_attn_mask(
 
     return is_causal | is_modality.any(dim = 1)
 
+# unet encoder related function
+
+def stack_same_shape_tensors_with_inverse(tensors: list[Tensor]):
+
+    shape_tensors_dict = defaultdict(list)
+    shape_batch_dict = defaultdict(int) # also store a shape -> num tensors dictionary to validate inverse function input
+    inverse_index_list = []
+
+    for tensor in tensors:
+        shape = tuple(tensor.shape)
+        batch_el = shape_batch_dict[shape]
+
+        shape_tensors_dict[shape].append(tensor)
+        shape_batch_dict[shape] += 1
+
+        inverse_index_list.append((shape, batch_el))
+
+    # stack all the tensors with same shapes to have a batch dimension
+
+    shape_tensors_dict = {shape: torch.stack(same_shape_tensors) for shape, same_shape_tensors in shape_tensors_dict.items()}
+
+    # inverse function
+
+    def inverse(
+        indexed_tensors: dict[tuple[int, ...], Tensor]
+    ) -> list[Tensor]:
+
+        out_shape_batch_dict = {shape: len(tensors) for shape, tensors in indexed_tensors.items()}
+
+        assert out_shape_batch_dict == shape_batch_dict
+
+        inversed = []
+
+        for shape, batch_el in inverse_index_list:
+            tensor = indexed_tensors[shape][batch_el]
+            inversed.append(tensor)
+
+        return inversed
+
+    return shape_tensors_dict, inverse
+
 # sampling related functions
 
 # min_p for text
