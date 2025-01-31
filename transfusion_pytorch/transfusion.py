@@ -551,6 +551,35 @@ def stack_same_shape_tensors_with_inverse(tensors: list[Tensor]):
 
     return shape_tensors_dict, inverse
 
+def filter_with_inverse(cond, inp):
+
+    indices = set()
+    filtered = []
+
+    for ind, el in enumerate(inp):
+        if cond(el):
+            indices.add(ind)
+            filtered.append(el)
+
+    def inverse(inverse_inp):
+        assert len(inverse_inp) == len(filtered)
+
+        output = []
+        inverse_inp_index = 0
+
+        for ind, el in enumerate(inp):
+            if ind not in indices:
+                output.append(el)
+                continue
+
+            inverse_inp_el = inverse_inp[inverse_inp_index]
+            output.append(inverse_inp_el)
+            inverse_inp_index += 1
+
+        return output
+
+    return filtered, inverse
+
 # sampling related functions
 
 # min_p for text

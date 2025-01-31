@@ -16,7 +16,8 @@ from transfusion_pytorch.transfusion import (
     Transfusion,
     flex_attention,
     exists,
-    stack_same_shape_tensors_with_inverse
+    stack_same_shape_tensors_with_inverse,
+    filter_with_inverse
 )
 
 @pytest.mark.parametrize('cache_kv', (False, True))
@@ -357,3 +358,12 @@ def test_stack_similar_shape_fn():
 
     assert all([torch.allclose(tensor1, tensor2) for tensor1, tensor2 in zip(data_plus_one, batch_processed_data_plus_one)])
 
+def test_filter_with_inverse():
+    x = [0, 1, 2, 3, 4]
+    is_even = lambda el: (el % 2) == 0
+
+    x_even, inverse = filter_with_inverse(is_even, x)
+    x_even_times_ten = [el * 10 for el in x_even]
+
+    y = inverse(x_even_times_ten)
+    assert y == [0, 1, 20, 3, 40]
