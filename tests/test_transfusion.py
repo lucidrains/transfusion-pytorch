@@ -17,7 +17,8 @@ from transfusion_pytorch.transfusion import (
     flex_attention,
     exists,
     stack_same_shape_tensors_with_inverse,
-    filter_with_inverse
+    filter_with_inverse,
+    apply_fn_modality_type
 )
 
 @pytest.mark.parametrize('cache_kv', (False, True))
@@ -367,3 +368,21 @@ def test_filter_with_inverse():
 
     y = inverse(x_even_times_ten)
     assert y == [0, 1, 20, 3, 40]
+
+def test_apply_fn_modality_type():
+    from torch import zeros
+
+    modalities = [
+        [zeros(3, 5)],
+        [zeros(1, 5)],
+        [(1, zeros(3, 5))],
+        [(1, zeros(2, 5))],
+        [(0, zeros(1, 5)), (1, zeros(3, 5))],
+    ]
+
+    modalities = apply_fn_modality_type(lambda x: x + 1, modalities)
+
+    modalities = apply_fn_modality_type(lambda x: x + 2, modalities, modality_type = 1)
+
+    assert (modalities[0][0][-1] == 1).all()
+    assert (modalities[2][0][-1] == 2).all()

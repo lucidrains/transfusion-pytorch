@@ -580,6 +580,44 @@ def filter_with_inverse(cond, inp):
 
     return filtered, inverse
 
+def apply_fn_modality_type(
+    fn: Callable,
+    modalities: ModalitySample | list[ModalitySample],
+    modality_type = 0
+) -> ModalitySample | list[ModalitySample]:
+
+    modalities, tree_spec = tree_flatten(modalities, is_leaf = lambda el: isinstance(el, tuple))
+
+    # standardize tuples to (<modality_type>, <modality_tensor>)
+
+    modalities = [(0, m) if (is_tensor(m) and m.dtype == torch.float) else m for m in modalities]
+
+    # filter for specific modality type to transform
+
+    modalities, inverse_filter = filter_with_inverse(lambda el: isinstance(el, tuple) and el[0] == modality_type, modalities)
+
+    # remove the type
+
+    modalities = [m for _, m in modalities]
+
+    # batch process
+
+    stacked_modalities, inverse_stack = stack_same_shape_tensors_with_inverse(modalities)
+
+    out = {shape: fn(batched_modalities) for shape, batched_modalities in stacked_modalities.items()}
+
+    out = inverse_stack(out)
+
+    # add back the type
+
+    out = [(modality_type, m) for m in out]
+
+    # replace transformed modalities and untree flatten
+
+    out = inverse_filter(out)
+
+    return tree_unflatten(out, tree_spec)
+
 # sampling related functions
 
 # min_p for text
