@@ -155,6 +155,20 @@ loss.backward()
 sampled = model.generate_text_only(text[:, :1], 1024)
 ```
 
+## Examples
+
+To run any of the examples `train_{example_name}.py` in the project root, simply install dependencies first as so
+
+```bash
+$ pip install .[examples]
+```
+
+If you run into some weird error with `safetensors`, run this too
+
+```bash
+$ pip install -U diffusers transformers accelerate scipy ftfy safetensors
+```
+
 ## Citations
 
 ```bibtex

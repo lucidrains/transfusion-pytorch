@@ -113,6 +113,7 @@ class ModalityInfo(NamedTuple):
     eom_id: int
     to_shape_fn: Callable | None
     channel_first_latent: bool
+    modality_type: int
 
 # helper functions
 
@@ -1489,7 +1490,8 @@ class Transfusion(Module):
             som_id = som_id,
             eom_id = eom_id,
             to_shape_fn = to_shape_fn,
-            channel_first_latent = channel_first_latent
+            channel_first_latent = channel_first_latent,
+            modality_type = modality_type
         )
 
     def get_all_modality_info(self) -> list[ModalityInfo]:
@@ -2264,9 +2266,23 @@ class Transfusion(Module):
 
         text = []
 
-        flows = defaultdict(list) # store flows for loss
+        # auto move all tensors to device of model
+
+        modalities = tree_map_tensor(modalities, lambda t: t.to(device))
+
+        # for all modalities, batch process same shaped modalities of the same type
+
+        if not is_decoding:
+            for mod in self.get_all_modality_info():
+                encode_fn = default(mod.encoder, nn.Identity())
+
+                with torch.no_grad():
+                    encode_fn.eval()
+                    modalities = apply_fn_modality_type(encode_fn, modalities, modality_type = mod.modality_type)
 
         # for parsing out the predicted flow from flattened sequence of tokens coming out of transformer
+
+        flows = defaultdict(list) # store flows for loss
 
         get_pred_flows: GetPredFlows = defaultdict(list) # functions for parsing modalities from Float['b n d'] for model back to latents or pixel space
 
@@ -2322,22 +2338,13 @@ class Transfusion(Module):
                 if is_text:
                     modality_tensor = modality
                 else:
-                    modality_type, modality_tensor = modality
+                    modality_type, modality_tensor, *_ = modality
 
                 # auto move modality tensor to correct device
-
-                modality_tensor = modality_tensor.to(device)
 
                 mod = self.get_modality_info(modality_type)
 
                 if is_modality:
-                    if not is_decoding:
-
-                        if exists(mod.encoder):
-                            with torch.no_grad():
-                                mod.encoder.eval()
-                                modality_tensor = self.maybe_add_temp_batch_dim(mod.encoder)(modality_tensor).detach()
-
                     assert 0 <= modality_type < self.num_modalities, f'received a modality index that is out of range. only {self.num_modalities} modalities specified'
 
                     channel_dim = 0 if mod.channel_first_latent else -1
