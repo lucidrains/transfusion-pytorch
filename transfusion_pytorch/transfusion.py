@@ -1805,26 +1805,16 @@ class Transfusion(Module):
         if return_unprocessed_modalities:
             return modality_sample
 
-        # post process modalities
+        # post process modality sample, decoding modality types if they have a decoder
 
-        processed_modality_sample = []
+        for mod in self.get_all_modality_info():
+            decoder_fn = default(mod.decoder, nn.Identity())
 
-        for sample in modality_sample:
-            if not isinstance(sample, tuple):
-                processed_modality_sample.append(sample)
-                continue
+            with torch.no_grad():
+                decoder_fn.eval()
+                modality_sample = apply_fn_modality_type(decoder_fn, modality_sample, modality_type = mod.modality_type)
 
-            modality_id, modality = sample
-
-            mod = self.get_modality_info(modality_id)
-
-            if exists(mod.decoder):
-                mod.decoder.eval()
-                modality = self.maybe_add_temp_batch_dim(mod.decoder)(modality)
-
-            processed_modality_sample.append((modality_id, modality))
-
-        return processed_modality_sample
+        return modality_sample
 
     @typecheck
     def forward_text(
