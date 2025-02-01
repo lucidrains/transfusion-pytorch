@@ -583,7 +583,8 @@ def filter_with_inverse(cond, inp):
 def apply_fn_modality_type(
     fn: Callable,
     modalities: ModalitySample | list[ModalitySample],
-    modality_type = 0
+    modality_type = 0,
+    return_untransformed = False
 ) -> ModalitySample | list[ModalitySample]:
 
     modalities, tree_spec = tree_flatten(modalities, is_leaf = lambda el: isinstance(el, tuple))
@@ -610,7 +611,10 @@ def apply_fn_modality_type(
 
     # add back the type
 
-    out = [(modality_type, m) for m in out]
+    if return_untransformed:
+        out = [(modality_type, transformed_m, prev_m) for transformed_m, prev_m in zip(out, modalities)]
+    else:
+        out = [(modality_type, transformed_m) for transformed_m in out]
 
     # replace transformed modalities and untree flatten
 
