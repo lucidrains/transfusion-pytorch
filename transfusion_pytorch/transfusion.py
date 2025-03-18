@@ -1276,10 +1276,29 @@ class Transfusion(Module):
 
         self.to_modality_shape_fn = cast_tuple(to_modality_shape_fn, self.num_modalities)
 
+        # default token lengths for respective modality
+        # fallback if the language model does not come up with valid dimensions
+
+        if not exists(modality_default_shape) or is_bearable(modality_default_shape, tuple[int, ...]):
+            modality_default_shape = (modality_default_shape,) * self.num_modalities
+
+        self.modality_default_shape = modality_default_shape
+
+        assert len(self.modality_default_shape) == self.num_modalities
+
+        self.fallback_to_default_shape_if_invalid = fallback_to_default_shape_if_invalid
+
+        # default `modality_num_dim` to `len(modality_default_shape)` if latter is specified but former not
+
+        modality_num_dim = default(modality_num_dim, tuple(len(shape) for shape in self.modality_default_shape))
+
         # specifying the number of dimensions for the modality, which will be hard validated
 
         self.modality_num_dim = cast_tuple(modality_num_dim, self.num_modalities)
+
         assert len(self.modality_num_dim) == self.num_modalities
+
+        assert all([not exists(ndim) or not exists(shape) or len(shape) == ndim for ndim, shape in zip(self.modality_num_dim, self.modality_default_shape)])
 
         # whether to add an extra axial positional embedding per modality
 
@@ -1317,18 +1336,6 @@ class Transfusion(Module):
         # auto handle batch dimension for modality encoder / decoder
 
         self.maybe_add_temp_batch_dim = add_temp_batch_dim if modality_encoder_decoder_requires_batch_dim else identity
-
-        # default token lengths for respective modality
-        # fallback if the language model does not come up with valid dimensions
-
-        if not exists(modality_default_shape) or is_bearable(modality_default_shape, tuple[int, ...]):
-            modality_default_shape = (modality_default_shape,) * self.num_modalities
-
-        self.modality_default_shape = modality_default_shape
-
-        assert len(self.modality_default_shape) == self.num_modalities
-
-        self.fallback_to_default_shape_if_invalid = fallback_to_default_shape_if_invalid
 
         # store number of text tokens
 
