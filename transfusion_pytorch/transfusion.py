@@ -2224,6 +2224,7 @@ class Transfusion(Module):
             batch_num_modalities = 0
 
             for ind, modality in enumerate(batch_modalities):
+
                 if is_tensor(modality) and modality.dtype == torch.float:
                     modality = (0, modality)
 
@@ -2345,7 +2346,9 @@ class Transfusion(Module):
                     assert 0 <= modality_type < self.num_modalities, f'received a modality index that is out of range. only {self.num_modalities} modalities specified'
 
                     channel_dim = 0 if mod.channel_first_latent else -1
+
                     assert mod.dim_latent == modality_tensor.shape[channel_dim], f'mismatch for modality latent dimension - expected {mod.dim_latent} but received {modality_tensor.shape[-1]} - modality shape is {tuple(modality_tensor.shape)}, perhaps you need to set `channel_first_latent` to the correct value'
+                    assert mod.num_dim == (len(modality_tensor.shape) - 1), f'mismatch for modality number of dimensions - expected {mod.num_dim} but received {len(modality_tensor.shape) - 1} {modality_tensor.shape}'
 
                 # auto ward against scalars (lone start end tokens)
 
@@ -2355,7 +2358,7 @@ class Transfusion(Module):
                 # handle text
 
                 if is_text:
-                    assert modality_tensor.ndim == 1
+                    assert modality_tensor.ndim == 1 and modality_tensor.dtype in (torch.int, torch.long)
                     text_length = modality_tensor.shape[0]
 
                     batch_text.append(modality_tensor)
@@ -2420,7 +2423,7 @@ class Transfusion(Module):
                     # start by just storing the token length of the modality
 
                     modality_shape_str = join([*map(str, modality_shape_tuple)], ',')
-                    modality_meta_info = self.char_tokenizer(modality_shape_str, device = device)
+                    modality_meta_info = self.char_tokenizer(modality_shape_str, device = device).long()
 
                     precede_modality_tokens = len(modality_meta_info) + 2
                     succeed_modality_tokens = 1
@@ -2450,6 +2453,7 @@ class Transfusion(Module):
                 modality_tensor = F.pad(modality_tensor, (0, 0, precede_modality_tokens, succeed_modality_tokens))
 
                 batch_modality_tokens.append(modality_tensor)
+
                 batch_text.append(text_tensor)
 
                 # handle axial positional embedding

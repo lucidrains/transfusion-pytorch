@@ -87,7 +87,7 @@ def test_auto_modality_transform(
         num_text_tokens = text_tokens,
         dim_latent = 384,
         channel_first_latent = True,
-        modality_default_shape = (32,),
+        modality_default_shape = (2, 2),
         transformer = dict(
             dim = 64,
             depth = 2,
@@ -385,3 +385,32 @@ def test_apply_fn_modality_type():
 
     assert (modalities[0][0][-1] == 1).all()
     assert (modalities[2][0][-1] == 2).all()
+
+
+def test_zero_dimensional():
+
+    model = Transfusion(
+        num_text_tokens = 256,
+        dim_latent = 384,
+        modality_default_shape = (),
+        transformer = dict(
+            dim = 512,
+            depth = 8,
+            num_residual_streams = 1
+        )
+    )
+
+    # any torch.long is text, torch.float is modalities
+
+    text_and_embeds = [
+        [randint(0, 256, (16,)), randn(384), randint(0, 256, (8,)), randn(384)],
+        [randint(0, 256, (16,)), randn(384), randint(0, 256, (5,)), randn(384), randint(0, 256, (9,))]
+    ]
+
+    loss = model(text_and_embeds)
+
+    loss.backward()
+
+    # after much training
+
+    one_multimodal_sample = model.sample()
