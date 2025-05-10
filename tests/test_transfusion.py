@@ -413,4 +413,4 @@ def test_zero_dimensional():
 
     # after much training
 
-    one_multimodal_sample = model.sample()
+    one_multimodal_sample = model.sample(prompt = randn(384))
