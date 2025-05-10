@@ -262,7 +262,8 @@ def char_tokenize(
     device = None,
     offset = 0
 ) -> Tensor:
-    return tensor([*map(ord, text)], device = device) + offset
+    tokenized = tensor([*map(ord, text)], device = device) + offset
+    return tokenized.long()
 
 def decode_chars(
     t: Tensor,
@@ -2423,7 +2424,7 @@ class Transfusion(Module):
                     # start by just storing the token length of the modality
 
                     modality_shape_str = join([*map(str, modality_shape_tuple)], ',')
-                    modality_meta_info = self.char_tokenizer(modality_shape_str, device = device).long()
+                    modality_meta_info = self.char_tokenizer(modality_shape_str, device = device)
 
                     precede_modality_tokens = len(modality_meta_info) + 2
                     succeed_modality_tokens = 1
