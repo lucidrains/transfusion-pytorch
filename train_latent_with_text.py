@@ -20,7 +20,7 @@ from transfusion_pytorch import Transfusion, print_modality_sample
 from datasets import load_dataset
 from diffusers.models import AutoencoderKL
 
-vae = AutoencoderKL.from_pretrained("CompVis/stable-diffusion-v1-4", subfolder = "vae")
+vae = AutoencoderKL.from_pretrained("./path/to/your/autoencoder", subfolder = "vae")
 
 class Encoder(Module):
     def __init__(self, vae):
