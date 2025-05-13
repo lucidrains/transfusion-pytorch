@@ -1580,10 +1580,12 @@ class Transfusion(Module):
         if is_tensor(prompt) and prompt.dtype == torch.float: # is modality with type 0 implicit
             prompt = (0, prompt)
 
+        prompt_is_modality = isinstance(prompt, tuple)
+
         if is_tensor(prompt) and prompt.dtype in (torch.int, torch.long): # is text only prompt
             prompt = [prompt]
 
-        elif isinstance(prompt, tuple):
+        elif prompt_is_modality:
             modality_type, modality = prompt
 
             mod = self.get_modality_info(modality_type)
@@ -1625,7 +1627,8 @@ class Transfusion(Module):
         curr_length = 0
         curr_modality_id = None
         modality_shape = None
-        num_past_modalities = 0  # starts off with no modalities in output
+
+        num_past_modalities = int(prompt_is_modality) # either 0 or 1 (if the prompt given is a modality)
 
         text_is_greedy = text_temperature == 0.
         is_decoding_text = True  # starts off with text decoding, and alternates with modalities depending on [som] tokens detected
