@@ -1007,7 +1007,8 @@ class Transformer(Module):
         attn_laser = False,
         unet_skips = True,
         use_flex_attn = False,
-        num_residual_streams = 4
+        num_residual_streams = 1,
+        num_residual_fracs = 4
     ):
         super().__init__()
         self.use_flex_attn = use_flex_attn
@@ -1023,13 +1024,9 @@ class Transformer(Module):
 
         # hyper connections
 
-        assert num_residual_streams > 0
-        is_hyper_connection = num_residual_streams > 1
-        self.num_residual_streams = num_residual_streams
-
         counter = count()
 
-        init_residual_fn, self.expand_stream, self.reduce_stream = HyperConnections.get_init_and_expand_reduce_stream_functions(num_residual_streams, disable = num_residual_streams == 1)
+        init_residual_fn, self.expand_stream, self.reduce_stream = HyperConnections.get_init_and_expand_reduce_stream_functions(num_residual_streams, num_fracs = num_residual_fracs)
 
         # layers
 

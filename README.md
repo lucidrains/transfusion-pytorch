@@ -265,3 +265,14 @@ $ pip install -U diffusers transformers accelerate scipy ftfy safetensors
     url     = {https://api.semanticscholar.org/CorpusID:272987528}
 }
 ```
+
+```bibtex
+@article{Zhu2025FracConnectionsFE,
+    title   = {Frac-Connections: Fractional Extension of Hyper-Connections},
+    author  = {Defa Zhu and Hongzhi Huang and Jundong Zhou and Zihao Huang and Yutao Zeng and Banggu Wu and Qiyang Min and Xun Zhou},
+    journal = {ArXiv},
+    year    = {2025},
+    volume  = {abs/2503.14125},
+    url     = {https://api.semanticscholar.org/CorpusID:277104144}
+}
+```
