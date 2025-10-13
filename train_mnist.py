@@ -24,7 +24,7 @@ results_folder.mkdir(exist_ok = True, parents = True)
 IMAGE_AFTER_TEXT = True   # False for captioning, True for text-to-image
 USE_PROMPT = False        # whether to use prompting, or synthesize from start token 
 NUM_TRAIN_STEPS = 20_000
-SAMPLE_EVERY = 250
+SAMPLE_EVERY = 500
 CHANNEL_FIRST = True
 
 # functions

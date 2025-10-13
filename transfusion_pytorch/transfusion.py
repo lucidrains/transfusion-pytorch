@@ -813,18 +813,24 @@ class GEGLU(Module):
         x, gates = x.chunk(2, dim = -1)
         return F.gelu(gates) * x
 
-def FeedForward(
-    dim,
-    expansion_factor = 4.,
-    dropout = 0.
-):
-    dim_inner = int(dim * expansion_factor * 2 / 3)
-    return nn.Sequential(
-        Linear(dim, dim_inner * 2),
-        GEGLU(),
-        nn.Dropout(dropout),
-        Linear(dim_inner, dim)
-    )
+class FeedForward(Module):
+    def __init__(
+        self,
+        dim,
+        expansion_factor = 4.,
+        dropout = 0.
+    ):
+        super().__init__()
+        dim_inner = int(dim * expansion_factor * 2 / 3)
+        self.net = nn.Sequential(
+            Linear(dim, dim_inner * 2),
+            GEGLU(),
+            nn.Dropout(dropout),
+            Linear(dim_inner, dim)
+        )
+
+    def forward(self, x):
+        return self.net(x)
 
 class Attention(Module):
     def __init__(
@@ -847,9 +853,14 @@ class Attention(Module):
         assert not (use_flex_attn and not exists(flex_attention)), 'flex attention is only available on torch 2.5.0 (nightly) onwards'
         self.use_flex_attn = use_flex_attn
 
-        self.to_qkv = nn.Sequential(
-            Linear(dim, dim_inner * 3, bias = False),
-            Rearrange('b n (qkv h d) -> qkv b h n d', qkv = 3, h = heads)
+        self.to_qk = nn.Sequential(
+            Linear(dim, dim_inner * 2, bias = False),
+            Rearrange('b n (qk h d) -> qk b h n d', qk = 2, h = heads)
+        )
+
+        self.to_v = nn.Sequential(
+            Linear(dim, dim_inner, bias = False),
+            Rearrange('b n (h d) -> b h n d', h = heads)
         )
 
         self.to_learned_value_residual = nn.Sequential(
@@ -902,7 +913,7 @@ class Attention(Module):
 
         # project to queries, keys, values
 
-        q, k, v = self.to_qkv(x)
+        q, k, v = (*self.to_qk(x), self.to_v(x))
 
         # value residual
 
@@ -1521,6 +1532,23 @@ class Transfusion(Module):
             set(self.modality_encoder.parameters()) -
             set(self.modality_decoder.parameters())
         )
+
+    def muon_parameters(self):
+        params = []
+
+        for m in self.modules():
+            if isinstance(m, Attention):
+                params.extend([
+                    *m.to_v.parameters(),
+                    *m.to_out.parameters(),
+                ])
+            elif isinstance(m, FeedForward):
+                params.extend([
+                    m.net[0].weight,
+                    m.net[-1].weight
+                ])
+
+        return params
 
     def create_dataloader(
         self,

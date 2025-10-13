@@ -5,7 +5,8 @@ import torch
 from torch import tensor
 from torch.nn import Module
 from torch.utils.data import Dataset, DataLoader
-from torch.optim import Adam
+
+from adam_atan2_pytorch import MuonAdamAtan2
 
 from einops import rearrange
 
@@ -83,7 +84,7 @@ dataset = MnistDataset()
 dataloader = DataLoader(dataset, batch_size = 32, shuffle = True)
 iter_dl = cycle(dataloader)
 
-optimizer = Adam(model.parameters(), lr = 8e-4)
+optimizer = MuonAdamAtan2(model.muon_parameters(), model.parameters(), lr = 8e-4)
 
 # train loop
 
