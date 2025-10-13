@@ -2177,7 +2177,8 @@ class Transfusion(Module):
         Scalar |
         tuple[Scalar, LossBreakdown] |
         list[Float['b _ _']] |
-        tuple[Float['b _ l'], Tensor]
+        tuple[Float['b _ l'], Tensor] |
+        list[list[Tensor]] # predicted flows from return_only_pred_flows = True
     ):
         is_decoding = exists(decoding_text_or_modality)
 
