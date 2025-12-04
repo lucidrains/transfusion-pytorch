@@ -632,6 +632,9 @@ def get_model_output_to_flow_fn(
     eps = 5e-2,
     return_decorator = False
 ):
+    if times.ndim == 0:
+        times = rearrange(times, '-> 1')
+
     def to_flow(out):
         nonlocal noised
         noised = noised.reshape_as(out)
@@ -1257,7 +1260,7 @@ class Transfusion(Module):
         *,
         num_text_tokens,
         transformer: dict | Transformer,
-        pred_clean = True, # https://arxiv.org/abs/2511.13720
+        pred_clean = False, # https://arxiv.org/abs/2511.13720
         dim_latent: int | tuple[int, ...] | None = None,
         channel_first_latent: bool | tuple[bool, ...] = False,
         add_pos_emb: bool | tuple[bool, ...] = False,
