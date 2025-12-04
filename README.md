@@ -276,3 +276,15 @@ $ pip install -U diffusers transformers accelerate scipy ftfy safetensors
     url     = {https://api.semanticscholar.org/CorpusID:277104144}
 }
 ```
+
+```bibtex
+@misc{li2025basicsletdenoisinggenerative,
+    title   = {Back to Basics: Let Denoising Generative Models Denoise}, 
+    author  = {Tianhong Li and Kaiming He},
+    year    = {2025},
+    eprint  = {2511.13720},
+    archivePrefix = {arXiv},
+    primaryClass = {cs.CV},
+    url     = {https://arxiv.org/abs/2511.13720}, 
+}
+```

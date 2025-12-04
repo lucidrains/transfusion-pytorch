@@ -624,6 +624,30 @@ def apply_fn_modality_type(
 
     return tree_unflatten(out, tree_spec)
 
+# decorator for model output to flow
+
+def get_model_output_to_flow_fn(
+    noised: Tensor,
+    times: Tensor,
+    eps = 5e-2,
+    return_decorator = False
+):
+    def to_flow(out):
+        padded_times = append_dims(times, out.ndim - 1)
+        flow = (out - noised) / (1. - padded_times).clamp_min(eps)
+        return flow
+
+    if not return_decorator:
+        return to_flow
+
+    def decorator(fn):
+        def inner(embed):
+            out = fn(embed)
+            return to_flow(out)
+        return inner
+
+    return decorator
+
 # sampling related functions
 
 # min_p for text
@@ -1230,6 +1254,7 @@ class Transfusion(Module):
         *,
         num_text_tokens,
         transformer: dict | Transformer,
+        pred_clean = False,
         dim_latent: int | tuple[int, ...] | None = None,
         channel_first_latent: bool | tuple[bool, ...] = False,
         add_pos_emb: bool | tuple[bool, ...] = False,
@@ -1251,6 +1276,7 @@ class Transfusion(Module):
             rtol = 1e-5,
             method = 'midpoint'
         ),
+        eps = 5e-2
     ):
         super().__init__()
 
@@ -1452,6 +1478,11 @@ class Transfusion(Module):
 
         self.has_recon_loss = reconstruction_loss_weight > 0.
         self.reconstruction_loss_weight = reconstruction_loss_weight
+
+        # whether model is predicting clean
+
+        self.pred_clean = pred_clean
+        self.eps = eps
 
         # flow sampling related
 
@@ -2001,6 +2032,13 @@ class Transfusion(Module):
         else:
             noised_tokens = tokens
 
+        # save the noised and times
+
+        model_output_to_flow = identity
+
+        if self.pred_clean:
+            model_output_to_flow = get_model_output_to_flow_fn(noised_tokens, times, self.eps)
+
         # from latent to model tokens
 
         noised_tokens = mod.latent_to_model(noised_tokens)
@@ -2034,7 +2072,9 @@ class Transfusion(Module):
 
         embed = inverse_pack_axial_dims(embed)
 
-        pred_flow = mod.model_to_latent(embed)
+        model_output = mod.model_to_latent(embed)
+
+        pred_flow = model_output_to_flow(model_output)
 
         if not return_loss:
             return pred_flow
@@ -2474,6 +2514,14 @@ class Transfusion(Module):
                 modality_tensor, unpack_modality_shape = pack_one_with_inverse(modality_tensor, '* d')
 
                 inverse_fn = model_to_pred_flow(batch_index, offset + precede_modality_tokens, modality_length, unpack_modality_shape)
+
+                # maybe decorate the function if model output is predicting clean
+
+                if self.pred_clean:
+                    decorator = get_model_output_to_flow_fn(modality_tensor, modality_time, self.eps, return_decorator = True)
+                    inverse_fn = decorator(inverse_fn)
+
+                # store function for extracting flow later
 
                 get_pred_flows[modality_type].append(inverse_fn)
 
