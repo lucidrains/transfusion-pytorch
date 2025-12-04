@@ -16,6 +16,8 @@ from torchvision.utils import save_image
 
 from transfusion_pytorch import Transfusion, print_modality_sample
 
+from accelerate import Accelerator
+
 rmtree('./results', ignore_errors = True)
 results_folder = Path('./results')
 results_folder.mkdir(exist_ok = True, parents = True)
@@ -48,6 +50,7 @@ model = Transfusion(
     modality_num_dim = 2,
     velocity_consistency_loss_weight = 0.1,
     reconstruction_loss_weight = 0.1,
+    pred_clean = True,
     transformer = dict(
         dim = 64,
         depth = 4,
@@ -55,7 +58,7 @@ model = Transfusion(
         heads = 8,
         attn_laser = True
     )
-).cuda()
+)
 
 ema_model = model.create_ema()
 
@@ -86,26 +89,35 @@ iter_dl = cycle(dataloader)
 
 optimizer = MuonAdamAtan2(model.muon_parameters(), model.parameters(), lr = 8e-4)
 
+accelerator = Accelerator()
+
+model, optimizer, dataloader = accelerator.prepare(model, optimizer, dataloader)
+
+ema_model.to(accelerator.device)
+
 # train loop
 
 for step in range(1, 100_000 + 1):
 
     loss = model(next(iter_dl), velocity_consistency_ema_model = ema_model)
-    loss.backward()
+    accelerator.backward(loss)
 
-    torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+    accelerator.clip_grad_norm_(model.parameters(), 0.5)
 
     optimizer.step()
     optimizer.zero_grad()
 
     ema_model.update()
 
-    print(f'{step}: {loss.item():.3f}')
+    accelerator.print(f'{step}: {loss.item():.3f}')
 
     if divisible_by(step, 500):
-        image = ema_model.generate_modality_only(batch_size = 64)
+        accelerator.wait_for_everyone()
 
-        save_image(
-            rearrange(image, '(gh gw) 1 h w -> 1 (gh h) (gw w)', gh = 8).detach().cpu(),
-            str(results_folder / f'{step}.png')
-        )
+        if accelerator.is_main_process:
+            image = ema_model.generate_modality_only(batch_size = 64)
+
+            save_image(
+                rearrange(image, '(gh gw) 1 h w -> 1 (gh h) (gw w)', gh = 8).detach().cpu(),
+                str(results_folder / f'{step}.png')
+            )

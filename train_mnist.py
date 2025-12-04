@@ -15,6 +15,8 @@ from torchvision.utils import save_image
 
 from transfusion_pytorch.transfusion import Transfusion, print_modality_sample
 
+from accelerate import Accelerator
+
 rmtree('./results', ignore_errors = True)
 results_folder = Path('./results')
 results_folder.mkdir(exist_ok = True, parents = True)
@@ -67,7 +69,7 @@ model = Transfusion(
         dim_head = 32,
         heads = 8,
     )
-).cuda()
+)
 
 ema_model = model.create_ema()
 
@@ -108,22 +110,28 @@ iter_dl = cycle(dataloader)
 
 optimizer = Adam(model.parameters(), lr = 3e-4)
 
+accelerator = Accelerator()
+
+model, optimizer, dataloader = accelerator.prepare(model, optimizer, dataloader)
+
+ema_model.to(accelerator.device)
+
 # train loop
 
 for step in range(1, NUM_TRAIN_STEPS + 1):
     model.train()
 
     loss = model(next(iter_dl))
-    loss.backward()
+    accelerator.backward(loss)
 
-    torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+    accelerator.clip_grad_norm_(model.parameters(), 0.5)
 
     optimizer.step()
     optimizer.zero_grad()
 
     ema_model.update()
 
-    print(f'{step}: {loss.item():.3f}')
+    accelerator.print(f'{step}: {loss.item():.3f}')
 
     # eval
 
@@ -139,7 +147,7 @@ for step in range(1, NUM_TRAIN_STEPS + 1):
 
             if IMAGE_AFTER_TEXT:
 
-                text_label = torch.randint(0, 10, ()).cuda()
+                text_label = torch.randint(0, 10, ()).to(accelerator.device)
                 one_multimodal_sample = ema_model.sample(prompt = text_label, max_length = 384)
 
             else:
@@ -163,7 +171,8 @@ for step in range(1, NUM_TRAIN_STEPS + 1):
 
         filename = f'{step}.{maybe_label[1].item()}.png'
 
-        save_image(
-            maybe_image[1].cpu(),
-            str(results_folder / filename),
-        )
+        if accelerator.is_main_process:
+            save_image(
+                maybe_image[1].cpu(),
+                str(results_folder / filename),
+            )

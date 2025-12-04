@@ -633,7 +633,10 @@ def get_model_output_to_flow_fn(
     return_decorator = False
 ):
     def to_flow(out):
+        nonlocal noised
+        noised = noised.reshape_as(out)
         padded_times = append_dims(times, out.ndim - 1)
+
         flow = (out - noised) / (1. - padded_times).clamp_min(eps)
         return flow
 
@@ -641,8 +644,8 @@ def get_model_output_to_flow_fn(
         return to_flow
 
     def decorator(fn):
-        def inner(embed):
-            out = fn(embed)
+        def inner(embed, *args, **kwargs):
+            out = fn(embed, *args, **kwargs)
             return to_flow(out)
         return inner
 
@@ -1254,7 +1257,7 @@ class Transfusion(Module):
         *,
         num_text_tokens,
         transformer: dict | Transformer,
-        pred_clean = False,
+        pred_clean = True, # https://arxiv.org/abs/2511.13720
         dim_latent: int | tuple[int, ...] | None = None,
         channel_first_latent: bool | tuple[bool, ...] = False,
         add_pos_emb: bool | tuple[bool, ...] = False,
@@ -1276,7 +1279,7 @@ class Transfusion(Module):
             rtol = 1e-5,
             method = 'midpoint'
         ),
-        eps = 5e-2
+        eps = 2e-3
     ):
         super().__init__()
 
