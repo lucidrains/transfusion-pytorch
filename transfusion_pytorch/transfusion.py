@@ -1260,7 +1260,7 @@ class Transfusion(Module):
         *,
         num_text_tokens,
         transformer: dict | Transformer,
-        pred_clean = False, # https://arxiv.org/abs/2511.13720
+        model_output_clean = True, # https://arxiv.org/abs/2511.13720
         dim_latent: int | tuple[int, ...] | None = None,
         channel_first_latent: bool | tuple[bool, ...] = False,
         add_pos_emb: bool | tuple[bool, ...] = False,
@@ -1282,7 +1282,7 @@ class Transfusion(Module):
             rtol = 1e-5,
             method = 'midpoint'
         ),
-        eps = 2e-3
+        eps = 1e-2
     ):
         super().__init__()
 
@@ -1485,9 +1485,9 @@ class Transfusion(Module):
         self.has_recon_loss = reconstruction_loss_weight > 0.
         self.reconstruction_loss_weight = reconstruction_loss_weight
 
-        # whether model is predicting clean
+        # whether model is outputting clean
 
-        self.pred_clean = pred_clean
+        self.model_output_clean = model_output_clean
         self.eps = eps
 
         # flow sampling related
@@ -2042,7 +2042,7 @@ class Transfusion(Module):
 
         model_output_to_flow = identity
 
-        if self.pred_clean:
+        if self.model_output_clean:
             model_output_to_flow = get_model_output_to_flow_fn(noised_tokens, times, self.eps)
 
         # from latent to model tokens
@@ -2523,7 +2523,7 @@ class Transfusion(Module):
 
                 # maybe decorate the function if model output is predicting clean
 
-                if self.pred_clean:
+                if self.model_output_clean:
                     decorator = get_model_output_to_flow_fn(modality_tensor, modality_time, self.eps, return_decorator = True)
                     inverse_fn = decorator(inverse_fn)
 

@@ -25,11 +25,13 @@ from transfusion_pytorch.transfusion import (
 @pytest.mark.parametrize('use_flex_attn', (False, True))
 @pytest.mark.parametrize('num_residual_streams', (1, 4))
 @pytest.mark.parametrize('reconstruction_loss_weight', (0., 0.1))
+@pytest.mark.parametrize('model_output_clean', (False, True))
 def test_transfusion(
     cache_kv: bool,
     use_flex_attn: bool,
     num_residual_streams: int,
-    reconstruction_loss_weight: float
+    reconstruction_loss_weight: float,
+    model_output_clean: bool
 ):
 
     if use_flex_attn and (not exists(flex_attention) or not cuda_available):
@@ -43,12 +45,13 @@ def test_transfusion(
         dim_latent = (384, 192),
         modality_default_shape = ((32,), (64,)),
         reconstruction_loss_weight = reconstruction_loss_weight,
+        model_output_clean = model_output_clean,
         transformer = dict(
             dim = 64,
             depth = 2,
             use_flex_attn = use_flex_attn,
             num_residual_streams = num_residual_streams
-        )
+        ),
     )
 
     if use_flex_attn:
