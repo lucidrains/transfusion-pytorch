@@ -44,7 +44,7 @@ from axial_positional_embedding import ContinuousAxialPositionalEmbedding
 
 from rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
 
-from hyper_connections import HyperConnections
+from hyper_connections import ManifoldConstrainedHyperConnections
 
 from tqdm import tqdm
 from loguru import logger
@@ -1067,7 +1067,7 @@ class Transformer(Module):
 
         counter = count()
 
-        init_residual_fn, self.expand_stream, self.reduce_stream = HyperConnections.get_init_and_expand_reduce_stream_functions(num_residual_streams, num_fracs = num_residual_fracs)
+        init_residual_fn, self.expand_stream, self.reduce_stream = ManifoldConstrainedHyperConnections.get_init_and_expand_reduce_stream_functions(num_residual_streams, num_fracs = num_residual_fracs)
 
         # layers
 
