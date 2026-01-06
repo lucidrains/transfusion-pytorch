@@ -1,6 +1,6 @@
 [project]
 name = "transfusion-pytorch"
-version = "0.15.1"
+version = "0.15.2"
 description = "Transfusion in Pytorch"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }
@@ -29,7 +29,7 @@ dependencies = [
     'einx>=0.3.0',
     'einops>=0.8.0',
     'ema-pytorch',
-    'hyper-connections>=0.3.7',
+    'hyper-connections>=0.3.11',
     'jaxtyping',
     'loguru',
     'rotary_embedding_torch>=0.8.4',
