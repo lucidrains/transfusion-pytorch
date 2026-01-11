@@ -1852,7 +1852,7 @@ class Transfusion(Module):
                         )
 
                         parse_cond = get_pred_flows_cond[curr_modality_id][-1]
-                        parsed_cond = parse_cond(embeds_cond, need_splice=True)
+                        parsed_cond = parse_cond(embeds_cond, need_splice=not exists(cache))
                         cond_flow = add_temp_batch_dim(mod.model_to_latent)(parsed_cond)
 
                         # Unconditional Forward
@@ -2422,7 +2422,10 @@ class Transfusion(Module):
                 embed = embed[batch_index]
 
                 if need_splice:
-                    embed = embed[start_index:(start_index + modality_length)]
+                    if embed.shape[0] < (start_index + modality_length):
+                            embed = embed[-modality_length:]
+                    else:
+                        embed = embed[start_index:(start_index + modality_length)]
 
                 embed = unpack_fn(embed)
                 return embed
