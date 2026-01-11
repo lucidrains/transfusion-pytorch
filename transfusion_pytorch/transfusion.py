@@ -2807,6 +2807,9 @@ class Transfusion(Module):
 
         text_labels = text_labels.masked_fill(is_any_modality, self.ignore_index)
 
+        # ignore "Image -> Null" mappings.
+        text_labels = text_labels.masked_fill(text_labels == self.null_text_id, self.ignore_index)
+
         text_loss = F.cross_entropy(
             rearrange(text_logits, 'b n l -> b l n'),
             text_labels,
