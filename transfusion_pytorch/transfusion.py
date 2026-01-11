@@ -2259,28 +2259,7 @@ class Transfusion(Module):
         tuple[Float['b _ l'], Tensor] |
         list[list[Tensor]] # predicted flows from return_only_pred_flows = True
     ):
-        # Classifier-free guidance 
-        if self.training and prob_uncond > 0:
-            if isinstance(modalities, list):
-                batch = len(modalities)
-                rand_mask = torch.rand(batch, device=self.device) < prob_uncond
-
-                new_modalities = []
-                for idx, batch_sample in enumerate(modalities):
-                    if rand_mask[idx]:
-                        # Create unconditional version
-                        uncond_sample = []
-                        for item in batch_sample:
-                            if is_tensor(item) and item.dtype in (torch.int, torch.long):
-                                uncond_sample.append(tensor([self.null_text_id], device=self.device))
-                            else:
-                                uncond_sample.append(item)
-                        new_modalities.append(uncond_sample)
-                    else:
-                        new_modalities.append(batch_sample)
-                modalities = new_modalities
-
-
+      
         is_decoding = exists(decoding_text_or_modality)
 
         is_text_only = is_tensor(modalities) and modalities.dtype in (torch.int, torch.long)
@@ -2342,6 +2321,27 @@ class Transfusion(Module):
                     *modality,
                     tensor_([self.eos_id])
                 ]
+
+        # Classifier-free guidance 
+        if self.training and prob_uncond > 0:
+            if isinstance(modalities, list):
+                batch = len(modalities)
+                rand_mask = torch.rand(batch, device=self.device) < prob_uncond
+
+                new_modalities = []
+                for idx, batch_sample in enumerate(modalities):
+                    if rand_mask[idx]:
+                        # Create unconditional version
+                        uncond_sample = []
+                        for item in batch_sample:
+                            if is_tensor(item) and item.dtype in (torch.int, torch.long):
+                                uncond_sample.append(tensor([self.null_text_id], device=self.device))
+                            else:
+                                uncond_sample.append(item)
+                        new_modalities.append(uncond_sample)
+                    else:
+                        new_modalities.append(batch_sample)
+                modalities = new_modalities
 
         # need axial pos emb
 
