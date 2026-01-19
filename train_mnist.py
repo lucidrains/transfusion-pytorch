@@ -62,6 +62,7 @@ model = Transfusion(
     modality_decoder = Decoder(),
     add_pos_emb = True,
     modality_num_dim = 2,
+    prob_uncond = 0.1,
     channel_first_latent = CHANNEL_FIRST,
     transformer = dict(
         dim = 64,
@@ -137,10 +138,13 @@ for step in range(1, NUM_TRAIN_STEPS + 1):
 
     if divisible_by(step, SAMPLE_EVERY):
 
+        GUIDANCE_SCALE = 3.0
+
         if not USE_PROMPT:
             # sampling from start to finish
 
-            one_multimodal_sample = ema_model.sample(max_length = 384)
+            one_multimodal_sample = ema_model.sample(max_length = 384, cfg_scale = GUIDANCE_SCALE)
+                
         else:
             # sampling using prompt
             # which differs depending on which comes first, text or images
@@ -148,14 +152,14 @@ for step in range(1, NUM_TRAIN_STEPS + 1):
             if IMAGE_AFTER_TEXT:
 
                 text_label = torch.randint(0, 10, ()).to(accelerator.device)
-                one_multimodal_sample = ema_model.sample(prompt = text_label, max_length = 384)
+                one_multimodal_sample = ema_model.sample(prompt = text_label, max_length = 384, cfg_scale = GUIDANCE_SCALE)
 
             else:
 
                 rand_batch = next(iter_dl)
                 rand_image = rand_batch[0][0]
 
-                one_multimodal_sample = ema_model.sample(prompt = rand_image, max_length = 384)
+                one_multimodal_sample = ema_model.sample(prompt = rand_image, max_length = 384, cfg_scale = GUIDANCE_SCALE)
 
         # make sure modality sample overall order of modalities look correct
 

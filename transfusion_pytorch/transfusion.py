@@ -1282,7 +1282,8 @@ class Transfusion(Module):
             rtol = 1e-5,
             method = 'midpoint'
         ),
-        eps = 1e-2
+        eps = 1e-2,
+        prob_uncond = 0.1
     ):
         super().__init__()
 
@@ -1497,6 +1498,8 @@ class Transfusion(Module):
         # flow sampling related
 
         self.odeint_fn = partial(odeint, **odeint_kwargs)
+
+        self.prob_uncond = prob_uncond
 
         # dummy loss
 
@@ -1828,16 +1831,7 @@ class Transfusion(Module):
 
                         # Conditional Input (Text + Image)
                         cond_input = [[*modality_sample, (curr_modality_id, denoised)]]
-
-                        # Unconditional Input (Null + Image)
-                        uncond_sample = []
-                        for item in modality_sample:
-                            if is_tensor(item) and item.dtype in (torch.int, torch.long):
-                                uncond_sample.append(tensor([self.null_text_id], device=device))
-                            else:
-                                uncond_sample.append(item)
-                        uncond_input = [[*uncond_sample, (curr_modality_id, denoised)]]
-                        
+  
                         step_times = rearrange(step_times, ' -> 1 1') # batch size of 1
                         step_times = F.pad(step_times, (num_past_modalities, 0), value = 1.) # past decoded modalities receive a time conditioning of 1.
 
@@ -1854,6 +1848,18 @@ class Transfusion(Module):
                         parse_cond = get_pred_flows_cond[curr_modality_id][-1]
                         parsed_cond = parse_cond(embeds_cond, need_splice=not exists(cache))
                         cond_flow = add_temp_batch_dim(mod.model_to_latent)(parsed_cond)
+
+                        if cfg_scale == 1.:
+                            return cond_flow
+
+                        # Unconditional Input (Null + Image)
+                        uncond_sample = []
+                        for item in modality_sample:
+                            if is_tensor(item) and item.dtype in (torch.int, torch.long):
+                                uncond_sample.append(tensor([self.null_text_id], device=device))
+                            else:
+                                uncond_sample.append(item)
+                        uncond_input = [[*uncond_sample, (curr_modality_id, denoised)]]
 
                         # Unconditional Forward
                         (embeds_uncond, get_pred_flows_uncond), _ = self.forward(
@@ -2248,7 +2254,7 @@ class Transfusion(Module):
         return_breakdown = False,
         return_embed = False,
         return_kv_cache = False,
-        prob_uncond = 0.1
+        prob_uncond: float | None = None
     ) -> (
         Float['b _ l'] |
         tuple[Float['b _ d'], GetPredFlows] |
@@ -2259,7 +2265,7 @@ class Transfusion(Module):
         tuple[Float['b _ l'], Tensor] |
         list[list[Tensor]] # predicted flows from return_only_pred_flows = True
     ):
-      
+
         is_decoding = exists(decoding_text_or_modality)
 
         is_text_only = is_tensor(modalities) and modalities.dtype in (torch.int, torch.long)
@@ -2323,6 +2329,7 @@ class Transfusion(Module):
                 ]
 
         # Classifier-free guidance 
+        prob_uncond = default(prob_uncond, self.prob_uncond)
         if self.training and prob_uncond > 0:
             if isinstance(modalities, list):
                 batch = len(modalities)
