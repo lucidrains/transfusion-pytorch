@@ -1282,7 +1282,8 @@ class Transfusion(Module):
             rtol = 1e-5,
             method = 'midpoint'
         ),
-        eps = 1e-2
+        eps = 1e-2,
+        prob_uncond = 0.1
     ):
         super().__init__()
 
@@ -1387,6 +1388,10 @@ class Transfusion(Module):
         num_text_special_ids = 2
 
         self.sos_id, self.eos_id = num_text_tokens, (num_text_tokens + 1)
+
+        # null text id
+        self.null_text_id = num_text_tokens + 2
+        num_text_special_ids += 1
 
         # modality meta, start and end tokens - termed [mom] [som] [eom] in this repo
 
@@ -1493,6 +1498,8 @@ class Transfusion(Module):
         # flow sampling related
 
         self.odeint_fn = partial(odeint, **odeint_kwargs)
+
+        self.prob_uncond = prob_uncond
 
         # dummy loss
 
@@ -1625,7 +1632,8 @@ class Transfusion(Module):
         fixed_modality_shape: tuple[int, ...] | None = None,
         init_modality_noise: Float['n d'] | None = None,
         modality_steps = 16,
-        return_unprocessed_modalities = False
+        return_unprocessed_modalities = False,
+        cfg_scale = 3.
     ) -> ModalitySample:
 
         device = self.device
@@ -1821,11 +1829,14 @@ class Transfusion(Module):
                     def ode_step_fn(step_times, denoised):
                         nonlocal new_kv_cache
 
+                        # Conditional Input (Text + Image)
+                        cond_input = [[*modality_sample, (curr_modality_id, denoised)]]
+  
                         step_times = rearrange(step_times, ' -> 1 1') # batch size of 1
                         step_times = F.pad(step_times, (num_past_modalities, 0), value = 1.) # past decoded modalities receive a time conditioning of 1.
 
-                        (embeds, get_pred_flows), new_kv_cache = self.forward(
-                            [[*modality_sample, (curr_modality_id, denoised)]],
+                        (embeds_cond, get_pred_flows_cond), new_kv_cache = self.forward(
+                            cond_input,
                             times = step_times,
                             return_embed = True,
                             cache = cache,
@@ -1834,13 +1845,40 @@ class Transfusion(Module):
                             decoding_text_or_modality = 'modality'
                         )
 
-                        parse_embed = get_pred_flows[curr_modality_id][-1]
+                        parse_cond = get_pred_flows_cond[curr_modality_id][-1]
+                        parsed_cond = parse_cond(embeds_cond, need_splice=not exists(cache))
+                        cond_flow = add_temp_batch_dim(mod.model_to_latent)(parsed_cond)
 
-                        parsed_embed = parse_embed(embeds, need_splice = not exists(cache))
+                        if cfg_scale == 1.:
+                            return cond_flow
 
-                        flow = add_temp_batch_dim(mod.model_to_latent)(parsed_embed)
+                        # Unconditional Input (Null + Image)
+                        uncond_sample = []
+                        for item in modality_sample:
+                            if is_tensor(item) and item.dtype in (torch.int, torch.long):
+                                uncond_sample.append(tensor([self.null_text_id], device=device))
+                            else:
+                                uncond_sample.append(item)
+                        uncond_input = [[*uncond_sample, (curr_modality_id, denoised)]]
 
-                        return flow
+                        # Unconditional Forward
+                        (embeds_uncond, get_pred_flows_uncond), _ = self.forward(
+                            uncond_input,
+                            times = step_times, # Same time
+                            return_embed = True,
+                            cache = None,
+                            decode_length = modality_length,
+                            return_kv_cache = True,
+                            decoding_text_or_modality = 'modality'
+                        )
+
+                        parse_uncond = get_pred_flows_uncond[curr_modality_id][-1]
+                        parsed_uncond = parse_uncond(embeds_uncond, need_splice=True)
+                        uncond_flow = add_temp_batch_dim(mod.model_to_latent)(parsed_uncond)
+
+                        final_flow = uncond_flow + cfg_scale * (cond_flow - uncond_flow)
+
+                        return final_flow
 
                     times = torch.linspace(0, 1, modality_steps, device = device)
 
@@ -2216,6 +2254,7 @@ class Transfusion(Module):
         return_breakdown = False,
         return_embed = False,
         return_kv_cache = False,
+        prob_uncond: float | None = None
     ) -> (
         Float['b _ l'] |
         tuple[Float['b _ d'], GetPredFlows] |
@@ -2226,6 +2265,7 @@ class Transfusion(Module):
         tuple[Float['b _ l'], Tensor] |
         list[list[Tensor]] # predicted flows from return_only_pred_flows = True
     ):
+
         is_decoding = exists(decoding_text_or_modality)
 
         is_text_only = is_tensor(modalities) and modalities.dtype in (torch.int, torch.long)
@@ -2287,6 +2327,28 @@ class Transfusion(Module):
                     *modality,
                     tensor_([self.eos_id])
                 ]
+
+        # Classifier-free guidance 
+        prob_uncond = default(prob_uncond, self.prob_uncond)
+        if self.training and prob_uncond > 0:
+            if isinstance(modalities, list):
+                batch = len(modalities)
+                rand_mask = torch.rand(batch, device=self.device) < prob_uncond
+
+                new_modalities = []
+                for idx, batch_sample in enumerate(modalities):
+                    if rand_mask[idx]:
+                        # Create unconditional version
+                        uncond_sample = []
+                        for item in batch_sample:
+                            if is_tensor(item) and item.dtype in (torch.int, torch.long):
+                                uncond_sample.append(tensor([self.null_text_id], device=self.device))
+                            else:
+                                uncond_sample.append(item)
+                        new_modalities.append(uncond_sample)
+                    else:
+                        new_modalities.append(batch_sample)
+                modalities = new_modalities
 
         # need axial pos emb
 
@@ -2367,7 +2429,10 @@ class Transfusion(Module):
                 embed = embed[batch_index]
 
                 if need_splice:
-                    embed = embed[start_index:(start_index + modality_length)]
+                    if embed.shape[0] < (start_index + modality_length):
+                            embed = embed[-modality_length:]
+                    else:
+                        embed = embed[start_index:(start_index + modality_length)]
 
                 embed = unpack_fn(embed)
                 return embed
@@ -2751,6 +2816,9 @@ class Transfusion(Module):
         # text autoregressive loss
 
         text_labels = text_labels.masked_fill(is_any_modality, self.ignore_index)
+
+        # ignore "Image -> Null" mappings.
+        text_labels = text_labels.masked_fill(text_labels == self.null_text_id, self.ignore_index)
 
         text_loss = F.cross_entropy(
             rearrange(text_logits, 'b n l -> b l n'),
