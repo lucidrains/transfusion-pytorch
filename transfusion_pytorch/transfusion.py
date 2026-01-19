@@ -2430,7 +2430,7 @@ class Transfusion(Module):
 
                 if need_splice:
                     if embed.shape[0] < (start_index + modality_length):
-                            embed = embed[-modality_length:]
+                        embed = embed[-modality_length:]
                     else:
                         embed = embed[start_index:(start_index + modality_length)]
 

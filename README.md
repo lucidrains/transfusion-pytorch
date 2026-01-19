@@ -6,6 +6,10 @@ Pytorch implementation of [Transfusion](https://www.arxiv.org/abs/2408.11039), "
 
 In this repo, we will substitute diffusion with flow matching given the success of Flux from Black Forest Labs (but will keep the original paper title given Transflow does not have the same ring). This repository will also attempt to extend to any number of modalities.
 
+## Appreciation
+
+- [Pranoy](https://github.com/pranoyr) for adding classifier free guidance!
+
 ## Install
 
 ```bash
