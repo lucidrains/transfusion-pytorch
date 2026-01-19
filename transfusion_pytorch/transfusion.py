@@ -44,7 +44,7 @@ from axial_positional_embedding import ContinuousAxialPositionalEmbedding
 
 from rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
 
-from hyper_connections import ManifoldConstrainedHyperConnections
+from hyper_connections.mHCv2 import ManifoldConstrainedHyperConnections
 
 from tqdm import tqdm
 from loguru import logger
