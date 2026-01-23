@@ -1856,7 +1856,13 @@ class Transfusion(Module):
                         uncond_sample = []
                         for item in modality_sample:
                             if is_tensor(item) and item.dtype in (torch.int, torch.long):
-                                uncond_sample.append(tensor([self.null_text_id], device=device))
+                                null_tokens = torch.full(
+                                    item.shape, 
+                                    self.null_text_id, 
+                                    dtype=item.dtype, 
+                                    device=device
+                                )
+                                uncond_sample.append(null_tokens)
                             else:
                                 uncond_sample.append(item)
                         uncond_input = [[*uncond_sample, (curr_modality_id, denoised)]]
@@ -2342,7 +2348,13 @@ class Transfusion(Module):
                         uncond_sample = []
                         for item in batch_sample:
                             if is_tensor(item) and item.dtype in (torch.int, torch.long):
-                                uncond_sample.append(tensor([self.null_text_id], device=self.device))
+                                null_tokens = torch.full(
+                                    item.shape, 
+                                    self.null_text_id, 
+                                    dtype=item.dtype, 
+                                    device=self.device
+                                )
+                                uncond_sample.append(null_tokens)
                             else:
                                 uncond_sample.append(item)
                         new_modalities.append(uncond_sample)
