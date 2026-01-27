@@ -1826,6 +1826,33 @@ class Transfusion(Module):
 
                     new_kv_cache = None
 
+                    use_cfg = cfg_scale != 1
+
+                    if use_cfg:
+                        # prepare unconditional kv cache for CFG
+                        uncond_history = [] 
+
+                        for item in modality_sample:
+                            if is_tensor(item) and item.dtype in (torch.int, torch.long):
+                                null_tokens = torch.full(
+                                    item.shape, 
+                                    self.null_text_id, 
+                                    dtype=item.dtype, 
+                                    device=device
+                                )
+                                uncond_history.append(null_tokens)
+                            else:
+                                uncond_history.append(item)
+
+                        with torch.no_grad():
+                            _, uncond_cache = self.forward(
+                                [uncond_history],
+                                return_loss = False,
+                                return_kv_cache = True,
+                                return_embed = True,
+                                decoding_text_or_modality = 'modality'
+                            )
+
                     def ode_step_fn(step_times, denoised):
                         nonlocal new_kv_cache
 
@@ -1849,30 +1876,17 @@ class Transfusion(Module):
                         parsed_cond = parse_cond(embeds_cond, need_splice=not exists(cache))
                         cond_flow = add_temp_batch_dim(mod.model_to_latent)(parsed_cond)
 
-                        if cfg_scale == 1.:
+                        if not use_cfg:
                             return cond_flow
 
-                        # Unconditional Input (Null + Image)
-                        uncond_sample = []
-                        for item in modality_sample:
-                            if is_tensor(item) and item.dtype in (torch.int, torch.long):
-                                null_tokens = torch.full(
-                                    item.shape, 
-                                    self.null_text_id, 
-                                    dtype=item.dtype, 
-                                    device=device
-                                )
-                                uncond_sample.append(null_tokens)
-                            else:
-                                uncond_sample.append(item)
-                        uncond_input = [[*uncond_sample, (curr_modality_id, denoised)]]
+                        uncond_input = [[*uncond_history, (curr_modality_id, denoised)]]
 
                         # Unconditional Forward
                         (embeds_uncond, get_pred_flows_uncond), _ = self.forward(
                             uncond_input,
                             times = step_times, # Same time
                             return_embed = True,
-                            cache = None,
+                            cache = uncond_cache,
                             decode_length = modality_length,
                             return_kv_cache = True,
                             decoding_text_or_modality = 'modality'
