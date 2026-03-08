@@ -283,12 +283,22 @@ $ pip install -U diffusers transformers accelerate scipy ftfy safetensors
 
 ```bibtex
 @misc{li2025basicsletdenoisinggenerative,
-    title   = {Back to Basics: Let Denoising Generative Models Denoise}, 
+    title   = {Back to Basics: Let Denoising Generative Models Denoise},
     author  = {Tianhong Li and Kaiming He},
     year    = {2025},
     eprint  = {2511.13720},
     archivePrefix = {arXiv},
     primaryClass = {cs.CV},
-    url     = {https://arxiv.org/abs/2511.13720}, 
+    url     = {https://arxiv.org/abs/2511.13720},
+}
+```
+
+```bibtex
+@misc{chefer2026self,
+    title   = {Self-Supervised Flow Matching for Scalable Multi-Modal Synthesis},
+    author  = {Hila Chefer and Patrick Esser and Dominik Lorenz and Dustin Podell and Vikash Raja and Vinh Tong and Antonio Torralba and Robin Rombach},
+    year    = {2026},
+    url     = {https://bfl.ai/research/self-flow},
+    note    = {Preprint}
 }
 ```

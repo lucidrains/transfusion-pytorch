@@ -13,7 +13,7 @@ import torchvision
 import torchvision.transforms as T
 from torchvision.utils import save_image
 
-from transfusion_pytorch.transfusion import Transfusion, print_modality_sample
+from transfusion_pytorch.transfusion import Transfusion, print_modality_sample, SelfMaskedRepTraining
 
 from accelerate import Accelerator
 
@@ -30,6 +30,9 @@ SAMPLE_EVERY = 500
 CHANNEL_FIRST = True
 
 # functions
+
+def exists(v):
+    return v is not None
 
 def divisible_by(num, den):
     return (num % den) == 0
@@ -72,7 +75,17 @@ model = Transfusion(
     )
 )
 
-ema_model = model.create_ema()
+ssl_wrapper = SelfMaskedRepTraining(
+    model,
+    use_asymmetric_dropout = True,
+    student_dropout_rate = 0.1,
+    teacher_dropout_rate = 0.,
+    rep_loss_weight = 0.1,
+    student_layer = -3,
+    teacher_layer = -1,
+)
+
+ema_model = ssl_wrapper.teacher
 
 class MnistDataset(Dataset):
     def __init__(self):
@@ -109,30 +122,29 @@ dataloader = model.create_dataloader(dataset, batch_size = 16, shuffle = True)
 
 iter_dl = cycle(dataloader)
 
-optimizer = Adam(model.parameters(), lr = 3e-4)
+optimizer = Adam(ssl_wrapper.parameters(), lr = 3e-4)
 
 accelerator = Accelerator()
 
-model, optimizer, dataloader = accelerator.prepare(model, optimizer, dataloader)
+ssl_wrapper, optimizer, dataloader = accelerator.prepare(ssl_wrapper, optimizer, dataloader)
 
 ema_model.to(accelerator.device)
 
 # train loop
 
 for step in range(1, NUM_TRAIN_STEPS + 1):
-    model.train()
-
-    loss = model(next(iter_dl))
+    ssl_wrapper.train()
+    loss, (student_loss, self_flow_loss) = ssl_wrapper(next(iter_dl))
     accelerator.backward(loss)
 
-    accelerator.clip_grad_norm_(model.parameters(), 0.5)
+    accelerator.clip_grad_norm_(ssl_wrapper.parameters(), 0.5)
 
     optimizer.step()
     optimizer.zero_grad()
 
-    ema_model.update()
+    ssl_wrapper.update_teacher()
 
-    accelerator.print(f'{step}: {loss.item():.3f}')
+    accelerator.print(f'{step}: {loss.item():.3f} | ar: {student_loss.item():.3f} | self flow: {self_flow_loss.item():.3f}')
 
     # eval
 

@@ -40,7 +40,7 @@ class MnistDataset(Dataset):
         self.mnist = torchvision.datasets.MNIST(
             './data/mnist',
             download = True
-        )   
+        )
 
         self.transform = T.Compose([
             T.PILToTensor(),

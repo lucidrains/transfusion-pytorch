@@ -1,6 +1,6 @@
 [project]
 name = "transfusion-pytorch"
-version = "0.16.3"
+version = "0.17.0"
 description = "Transfusion in Pytorch"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }
@@ -40,7 +40,7 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://pypi.org/project/transfusion-pytorch/"
-Repository = "https://github.com/lucidrains/transfusion-pytorch"
+Repository = "https://codeberg.org/lucidrains/transfusion-pytorch"
 
 [build-system]
 requires = ["hatchling"]
@@ -77,3 +77,11 @@ allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["transfusion_pytorch"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "transfusion_pytorch",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+]

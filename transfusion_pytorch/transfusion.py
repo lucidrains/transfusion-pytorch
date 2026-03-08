@@ -19,7 +19,7 @@ import math
 from collections import defaultdict
 
 from random import randrange
-from itertools import count
+from itertools import count, chain
 from functools import partial, wraps, cache
 from typing import NamedTuple, Callable, Literal
 
@@ -145,6 +145,11 @@ def cast_tuple(t, length = 1):
 
 def tree_map_tensor(sample, fn: Callable):
     return tree_map(lambda t: t if not is_tensor(t) else fn(t), sample)
+
+def set_dropout_(model: Module, prob: float):
+    for module in model.modules():
+        if isinstance(module, nn.Dropout):
+            module.p = prob
 
 def add_temp_batch_dim(fn: Callable):
     @wraps(fn)
@@ -1108,6 +1113,7 @@ class Transformer(Module):
         decode_length: int | None = None,
         modality_only = False,
         causal_mask = False,
+        return_hiddens = False,
         return_kv_cache = False
     ):
         batch, seq_len, device, input_is_cuda = x.shape[0], x.shape[-2], x.device, x.is_cuda
@@ -1190,6 +1196,7 @@ class Transformer(Module):
         value_residual = None
 
         new_cache = []
+        hiddens = []
 
         depth = len(self.layers)
 
@@ -1238,6 +1245,9 @@ class Transformer(Module):
 
             x = add_ff_residual(ff_out)
 
+            if return_hiddens:
+                hiddens.append(x)
+
         # reduce multiple residual streams for maybe hyper connection
 
         x = self.reduce_stream(x)
@@ -1246,10 +1256,21 @@ class Transformer(Module):
 
         out = self.norm(x)
 
-        if not return_kv_cache:
+        if return_hiddens:
+            hiddens.append(out)
+
+        if not return_kv_cache and not return_hiddens:
             return out
 
-        return out, stack(new_cache)
+        ret = (out,)
+
+        if return_hiddens:
+            ret = (*ret, hiddens)
+
+        if return_kv_cache:
+            ret = (*ret, stack(new_cache))
+
+        return ret
 
 # classes
 
@@ -1830,15 +1851,15 @@ class Transfusion(Module):
 
                     if use_cfg:
                         # prepare unconditional kv cache for CFG
-                        uncond_history = [] 
+                        uncond_history = []
 
                         for item in modality_sample:
                             if is_tensor(item) and item.dtype in (torch.int, torch.long):
                                 null_tokens = torch.full(
-                                    item.shape, 
-                                    self.null_text_id, 
-                                    dtype=item.dtype, 
-                                    device=device
+                                    item.shape,
+                                    self.null_text_id,
+                                    dtype = item.dtype,
+                                    device = device
                                 )
                                 uncond_history.append(null_tokens)
                             else:
@@ -1858,7 +1879,7 @@ class Transfusion(Module):
 
                         # Conditional Input (Text + Image)
                         cond_input = [[*modality_sample, (curr_modality_id, denoised)]]
-  
+
                         step_times = rearrange(step_times, ' -> 1 1') # batch size of 1
                         step_times = F.pad(step_times, (num_past_modalities, 0), value = 1.) # past decoded modalities receive a time conditioning of 1.
 
@@ -1954,6 +1975,7 @@ class Transfusion(Module):
         return_loss = True,
         return_embed = False,
         cache: Tensor | None = None,
+        return_hiddens = False,
         return_kv_cache = False
     ) -> (
         Scalar |
@@ -1981,23 +2003,32 @@ class Transfusion(Module):
 
         # attention
 
-        embed, kv_cache = self.transformer(
+        transformer_out = self.transformer(
             tokens,
             rotary_emb = rotary_emb,
             causal_mask = True,
             cache = cache,
-            return_kv_cache = True
+            return_kv_cache = return_kv_cache,
+            return_hiddens = True
         )
+
+        embed, hiddens, *maybe_kv_cache = transformer_out
+        kv_cache = maybe_kv_cache[0] if return_kv_cache else None
 
         # text unembedding
 
         logits = self.to_text_logits(embed)
 
         if not return_loss:
-            if not return_kv_cache:
-                return logits
+            ret = (logits,)
 
-            return logits, kv_cache
+            if return_kv_cache:
+                ret = (*ret, kv_cache)
+
+            if return_hiddens:
+                ret = (*ret, hiddens)
+
+            return ret[0] if len(ret) == 1 else ret
 
         logits = logits.masked_fill(~self.text_only_logits_mask, max_neg_value(logits))
 
@@ -2007,7 +2038,10 @@ class Transfusion(Module):
             ignore_index = self.ignore_index
         )
 
-        return loss
+        if not return_hiddens:
+            return loss
+
+        return loss, hiddens
 
     @torch.no_grad()
     @eval_decorator
@@ -2262,7 +2296,7 @@ class Transfusion(Module):
             Float['b ...']
         ),
         times: Float['b m'] | None = None,
-        num_modalities_to_times_fn: Callable[[Int['b']], Float['b m']] | None = None, # allows a researcher to customize the times (noise level) based on the modality lengths in a given sample 
+        num_modalities_to_times_fn: Callable[[Int['b']], Float['b m']] | None = None, # allows a researcher to customize the times (noise level) based on the modality lengths in a given sample
         modality_type: int | None = None,
         cache: Tensor | None = None,
         decode_length: int | None = None,
@@ -2273,7 +2307,9 @@ class Transfusion(Module):
         return_loss = True,
         return_breakdown = False,
         return_embed = False,
+        return_hiddens = False,
         return_kv_cache = False,
+        return_times = False,
         prob_uncond: float | None = None
     ) -> (
         Float['b _ l'] |
@@ -2283,7 +2319,7 @@ class Transfusion(Module):
         tuple[Scalar, LossBreakdown] |
         list[Float['b _ _']] |
         tuple[Float['b _ l'], Tensor] |
-        list[list[Tensor]] # predicted flows from return_only_pred_flows = True
+        list[list[Tensor]]
     ):
 
         is_decoding = exists(decoding_text_or_modality)
@@ -2309,6 +2345,7 @@ class Transfusion(Module):
                 return_loss = return_loss,
                 return_embed = return_embed,
                 cache = cache,
+                return_hiddens = return_hiddens,
                 return_kv_cache = return_kv_cache
             )
 
@@ -2329,26 +2366,28 @@ class Transfusion(Module):
         tensor_ = partial(tensor, device = device)
 
         # save a copy for ema model for velocity matching
+        velocity_modalities = modalities
 
         if need_velocity_matching:
-            velocity_modalities = modalities
-
             if isinstance(velocity_modalities, list):
                 velocity_modalities = [modality.copy() for modality in velocity_modalities]
+
+        # defensively shallow copy out inner lists to prevent in-place mutation of user input
+        if isinstance(modalities, list):
+            modalities = [list(batch) if isinstance(batch, list) else batch for batch in modalities]
 
         # add "sentence" start and end tokens when training
 
         if return_loss or need_velocity_matching:
-            modalities = modalities.copy()
+            if isinstance(modalities, list):
+                for i, modality in enumerate(modalities):
+                    modalities[i] = [
+                        tensor_([self.sos_id]),
+                        *modality,
+                        tensor_([self.eos_id])
+                    ]
 
-            for i, modality in enumerate(modalities):
-                modalities[i] = [
-                    tensor_([self.sos_id]),
-                    *modality,
-                    tensor_([self.eos_id])
-                ]
-
-        # Classifier-free guidance 
+        # Classifier-free guidance
         prob_uncond = default(prob_uncond, self.prob_uncond)
         if self.training and prob_uncond > 0:
             if isinstance(modalities, list):
@@ -2359,21 +2398,25 @@ class Transfusion(Module):
                 for idx, batch_sample in enumerate(modalities):
                     if rand_mask[idx]:
                         # Create unconditional version
+
                         uncond_sample = []
+
                         for item in batch_sample:
                             if is_tensor(item) and item.dtype in (torch.int, torch.long):
                                 null_tokens = torch.full(
-                                    item.shape, 
-                                    self.null_text_id, 
-                                    dtype=item.dtype, 
-                                    device=self.device
+                                    item.shape,
+                                    self.null_text_id,
+                                    dtype = item.dtype,
+                                    device = self.device
                                 )
                                 uncond_sample.append(null_tokens)
                             else:
                                 uncond_sample.append(item)
+
                         new_modalities.append(uncond_sample)
                     else:
                         new_modalities.append(batch_sample)
+
                 modalities = new_modalities
 
         # need axial pos emb
@@ -2414,7 +2457,7 @@ class Transfusion(Module):
 
                 if exists(num_modalities_to_times_fn):
                     times = num_modalities_to_times_fn(num_modalities)
-        
+
         # if needs velocity matching, make sure times are in the range of 0 - (1. - <velocity consistency delta time>)
 
         if need_velocity_matching:
@@ -2428,8 +2471,6 @@ class Transfusion(Module):
         modality_pos_emb = []
 
         text = []
-
-        # auto move all tensors to device of model
 
         modalities = tree_map_tensor(modalities, lambda t: t.to(device))
 
@@ -2777,7 +2818,7 @@ class Transfusion(Module):
 
         # attention
 
-        embed, kv_cache = self.transformer(
+        embed, hiddens, *maybe_kv_cache = self.transformer(
             tokens,
             times = times_cond,
             rotary_emb = rotary_emb,
@@ -2785,26 +2826,42 @@ class Transfusion(Module):
             is_any_modality = is_any_modality_when_decoding,
             cache = cache,
             decode_length = decode_length,
-            return_kv_cache = True
+            return_hiddens = True,
+            return_kv_cache = return_kv_cache
         )
+
+        kv_cache = maybe_kv_cache[0] if return_kv_cache else None
+
+        # helper for appending auxiliary returns
+
+        def maybe_pack_aux(out):
+            ret = (out,)
+
+            if return_kv_cache:
+                ret = (*ret, kv_cache)
+
+            if return_hiddens:
+                ret = (*ret, hiddens)
+
+            if return_times:
+                ret = (*ret, times)
+
+            if len(ret) == 1:
+                return ret[0]
+
+            return ret
 
         # early return for embedding for decoding modality
 
         if return_embed:
-            if not return_kv_cache:
-                return (embed, get_pred_flows)
-
-            return (embed, get_pred_flows), kv_cache
+            return maybe_pack_aux((embed, get_pred_flows))
 
         # text unembedding
 
         text_logits = self.to_text_logits(embed)
 
         if not return_loss:
-            if not return_kv_cache:
-                return text_logits
-
-            return text_logits, kv_cache
+            return maybe_pack_aux(text_logits)
 
         # flow loss
 
@@ -2823,7 +2880,7 @@ class Transfusion(Module):
             for get_pred_flow, get_recon_loss in zip(modality_get_pred_flows, modality_get_recon_losses):
 
                 pred_flow = get_pred_flow(embed)
-                pred_flow = add_temp_batch_dim(mod.model_to_latent)(pred_flow) 
+                pred_flow = add_temp_batch_dim(mod.model_to_latent)(pred_flow)
                 modality_pred_flows.append(pred_flow)
 
                 if not return_loss or not self.has_recon_loss:
@@ -2941,9 +2998,140 @@ class Transfusion(Module):
                 (stack(averaged_recon_losses) * modality_loss_weights).sum() * self.reconstruction_loss_weight
             )
 
-        # return total loss if no breakdown needed
+        # return total loss and maybe breakdown
 
-        if not return_breakdown:
+        if not return_breakdown and not return_hiddens and not return_times:
             return total_loss
 
-        return total_loss, LossBreakdown(total_loss, text_loss, flow_losses, velocity_match_losses, recon_losses)
+        ret = (total_loss,)
+
+        if return_breakdown:
+            breakdown = LossBreakdown(total_loss, text_loss, flow_losses, velocity_match_losses, recon_losses)
+            ret = (*ret, breakdown)
+
+        if return_hiddens:
+            ret = (*ret, hiddens)
+
+        if return_times:
+            ret = (*ret, times)
+
+        return ret
+
+# Self-Masked Representation Training
+# following the similar formula as in 'Self-Flow' from Chefer et al. at Black Forest Labs
+# https://bfl.ai/research/self-flow
+
+def default_rep_loss_fn(pred, target):
+    cos_sim = F.cosine_similarity(pred, target, dim = -1)
+    return 1. - cos_sim.mean()
+
+class SelfMaskedRepTraining(Module):
+    def __init__(
+        self,
+        net: Transfusion,
+        ema_beta = 0.999,
+        rep_loss_weight = 0.1,
+        student_layer = -3,
+        teacher_layer = -1,
+        loss_fn = default_rep_loss_fn,
+        use_asymmetric_dropout = True,
+        student_dropout_rate = 0.1,
+        teacher_dropout_rate = 0.
+    ):
+        super().__init__()
+        assert not use_asymmetric_dropout or student_dropout_rate > teacher_dropout_rate, 'student must have greater dropout rate than teacher to ensure teacher has a better view'
+
+        self.student = net
+        self.teacher = net.create_ema(beta = ema_beta)
+
+        self.rep_loss_weight = rep_loss_weight
+        self.has_ssl_loss = rep_loss_weight > 0
+
+        self.use_asymmetric_dropout = use_asymmetric_dropout
+        self.student_dropout_rate = student_dropout_rate
+        self.teacher_dropout_rate = teacher_dropout_rate
+
+        self.student_layer = student_layer
+        self.teacher_layer = teacher_layer
+        self.loss_fn = loss_fn
+
+        # prediction head logic
+
+        dim = net.dim
+
+        self.student_predict_head = nn.Sequential(
+            RMSNorm(dim),
+            FeedForward(dim)
+        )
+
+        self.register_buffer('zero', tensor(0.))
+
+    def parameters(self):
+        return chain(
+            self.student.parameters(),
+            self.student_predict_head.parameters()
+        )
+
+    def update_teacher(self):
+        self.teacher.update()
+
+    def forward(
+        self,
+        *args,
+        **kwargs
+    ):
+        # student pass with masked inputs (via asymmetric dropout)
+
+        if self.use_asymmetric_dropout:
+            set_dropout_(self.student, self.student_dropout_rate)
+
+        student_loss, student_hiddens, student_times = self.student(
+            *args,
+            return_loss = True,
+            return_hiddens = True,
+            return_times = True,
+            **kwargs
+        )
+
+        if not self.has_ssl_loss:
+            return student_loss, (student_loss, self.zero)
+
+        # extract student representation at layer l
+
+        student_rep = student_hiddens[self.student_layer]
+
+        # teacher pass with unmasked (cleaner) inputs
+
+        if self.use_asymmetric_dropout:
+            set_dropout_(self.teacher.ema_model, self.teacher_dropout_rate)
+
+        with torch.no_grad():
+            _, teacher_hiddens = self.teacher.ema_model(
+                *args,
+                times = student_times,
+                return_loss = True,
+                return_hiddens = True,
+                **kwargs
+            )
+
+            teacher_rep = teacher_hiddens[self.teacher_layer]
+
+        # squeeze out the extra stream dimension if it exists
+
+        if student_rep.ndim == 4:
+            student_rep = rearrange(student_rep, 'b n 1 d -> b n d')
+
+        if teacher_rep.ndim == 4:
+            teacher_rep = rearrange(teacher_rep, 'b n 1 d -> b n d')
+
+        # predict teacher representation
+
+        student_pred = self.student_predict_head(student_rep)
+
+        self_flow_loss = self.loss_fn(student_pred, teacher_rep)
+
+        # losses
+
+        total_loss = student_loss + self_flow_loss * self.rep_loss_weight
+
+        return total_loss, (student_loss, self_flow_loss)
