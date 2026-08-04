@@ -453,3 +453,111 @@ def test_self_flow():
 
     assert exists(self_flow_loss) and exists(student_loss)
     assert total_loss.shape == ()
+
+@pytest.mark.parametrize('cache_kv', (False, True))
+@pytest.mark.parametrize('prob_uncond', (0.0, 0.5, 1.0))
+def test_classifier_free_guidance(
+    cache_kv: bool,
+    prob_uncond: float
+):
+    text_tokens = 16
+
+    model = Transfusion(
+        num_text_tokens = text_tokens,
+        dim_latent = 8,
+        prob_uncond = prob_uncond,
+        modality_default_shape = (4,),
+        transformer = dict(
+            dim = 16,
+            depth = 1,
+            use_flex_attn = False
+        )
+    )
+
+    # dataset batch with text and image modalities
+
+    text_and_images = [
+        [randint(0, text_tokens, (8,)), randn(4, 8), randint(0, text_tokens, (4,))],
+        [randint(0, text_tokens, (6,)), randn(4, 8), randint(0, text_tokens, (5,))]
+    ]
+
+    # train forward pass with CFG drop
+
+    model.train()
+    loss = model(text_and_images)
+    loss.backward()
+
+    # sample with CFG scale > 1
+
+    prompt = [randint(0, text_tokens, (4,))]
+    sample_cfg1 = model.sample(prompt, max_length = 8, cfg_scale = 1.0, cache_kv = cache_kv)
+    sample_cfg3 = model.sample(prompt, max_length = 8, cfg_scale = 3.0, cache_kv = cache_kv)
+
+    assert len(sample_cfg1) > 0
+    assert len(sample_cfg3) > 0
+
+def test_e2e_multimodal_cfg_sampling():
+    from transfusion_pytorch.transfusion import random_modality_length_to_time_fn
+
+    text_tokens = 16
+
+    model = Transfusion(
+        num_text_tokens = text_tokens,
+        dim_latent = 8,
+        prob_uncond = 0.2,
+        modality_default_shape = (4,),
+        transformer = dict(
+            dim = 16,
+            depth = 1,
+            use_flex_attn = False
+        )
+    )
+
+    text_and_images = [
+        [randint(0, text_tokens, (8,)), randn(4, 8), randint(0, text_tokens, (4,))],
+        [randint(0, text_tokens, (6,)), randn(4, 8), randint(0, text_tokens, (5,))]
+    ]
+
+    loss = model(text_and_images, num_modalities_to_times_fn = random_modality_length_to_time_fn)
+    loss.backward()
+
+    # sample starting with a [som] token to force modality generation followed by text
+
+    prime = [tensor([model.som_ids[0]])]
+    sample = model.sample(prime, max_length = 16, cfg_scale = 2.5, cache_kv = True)
+
+    assert len(sample) >= 3
+
+
+def test_e2e_self_flow_with_cfg():
+    model = Transfusion(
+        num_text_tokens = 32,
+        dim_latent = 16,
+        prob_uncond = 0.1,
+        modality_default_shape = (4,),
+        transformer = dict(
+            dim = 16,
+            depth = 1,
+            num_residual_streams = 1
+        )
+    )
+
+    wrapper = SelfMaskedRepTraining(
+        model,
+        use_asymmetric_dropout = True,
+        student_dropout_rate = 0.1,
+        teacher_dropout_rate = 0.,
+        rep_loss_weight = 0.1,
+        student_layer = -1,
+        teacher_layer = -1
+    )
+
+    data = [
+        [randint(0, 32, (12,)), randn(4, 16), randint(0, 32, (6,))]
+    ]
+
+    total_loss, (student_loss, self_flow_loss) = wrapper(data)
+    total_loss.backward()
+    wrapper.update_teacher()
+
+    assert total_loss.ndim == 0
