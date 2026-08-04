@@ -11,7 +11,6 @@ d - dimension
 l - logits (text)
 i, j - sequence (row, col)
 p - positions
-s - residual streams
 """
 
 import os
@@ -43,8 +42,6 @@ from ema_pytorch import EMA
 from axial_positional_embedding import ContinuousAxialPositionalEmbedding
 
 from rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
-
-from hyper_connections.mHCv2 import ManifoldConstrainedHyperConnections
 
 from tqdm import tqdm
 from loguru import logger
@@ -298,9 +295,9 @@ def gumbel_noise(t):
     noise = torch.rand_like(t)
     return -log(-log(noise))
 
-def gumbel_sample(t, temperature = 1., dim = -1, keepdim = True):
-    noise = gumbel_noise(t) * int(temperature > 0)
-    return (t / temperature + noise).argmax(dim = dim, keepdim = keepdim)
+def gumbel_sample(t, dim = -1, keepdim = True):
+    noise = gumbel_noise(t)
+    return (t + noise).argmax(dim = dim, keepdim = keepdim)
 
 # dataloader related
 
@@ -822,6 +819,41 @@ class RMSNorm(Module):
     def forward(self, x):
         return l2norm(x) * self.scale * (self.gamma + 1.) # use unit offset from Ohad Rubin
 
+# attention residual
+
+class AttentionResidual(Module):
+    def __init__(
+        self,
+        dim
+    ):
+        super().__init__()
+
+        self.scale = dim ** -0.5
+        self.norm_keys = RMSNorm(dim)
+
+        self.pseudo_queries = nn.Parameter(torch.zeros(dim))
+        nn.init.normal_(self.pseudo_queries, std = 0.02)
+
+    def forward(
+        self,
+        hiddens
+    ):
+        if isinstance(hiddens, list):
+            hiddens = stack(hiddens)
+
+        # cross attention
+
+        values = hiddens
+        keys = self.norm_keys(values)
+
+        sim = einsum(self.pseudo_queries, keys, 'd, l ... d -> ... l') * self.scale
+
+        # attention and aggregate
+
+        attn = sim.softmax(dim = -1)
+
+        return einsum(attn, values, '... l, l ... d -> ... d')
+
 class GEGLU(Module):
     def forward(self, x):
         x, gates = x.chunk(2, dim = -1)
@@ -937,6 +969,11 @@ class Attention(Module):
             mix = self.to_learned_value_residual(x)
             v = v * mix + value_residual * (1. - mix)
 
+        # rotary embeddings
+
+        if exists(rotary_emb):
+            q, k = tuple(apply_rotary_emb(rotary_emb, t, freqs_seq_dim = -2) for t in (q, k))
+
         # handle cache being passed in
 
         if exists(cache):
@@ -948,11 +985,6 @@ class Attention(Module):
 
         if return_kv_cache:
             kv_cache = stack((k, v))
-
-        # rotary embeddings
-
-        if exists(rotary_emb):
-            q, k = tuple(apply_rotary_emb(rotary_emb, t, freqs_seq_dim = -2) for t in (q, k))
 
         # laser attention
 
@@ -1031,9 +1063,7 @@ class Transformer(Module):
         ff_kwargs: dict = dict(),
         attn_laser = False,
         unet_skips = True,
-        use_flex_attn = False,
-        num_residual_streams = 1,
-        num_residual_fracs = 4
+        use_flex_attn = False
     ):
         super().__init__()
         self.use_flex_attn = use_flex_attn
@@ -1046,12 +1076,6 @@ class Transformer(Module):
             Linear(dim + 1, dim * 4),
             nn.SiLU()
         )
-
-        # hyper connections
-
-        counter = count()
-
-        init_residual_fn, self.expand_stream, self.reduce_stream = ManifoldConstrainedHyperConnections.get_init_and_expand_reduce_stream_functions(num_residual_streams, num_fracs = num_residual_fracs)
 
         # layers
 
@@ -1071,10 +1095,9 @@ class Transformer(Module):
             attn = AdaptiveWrapper(attn, dim = dim, dim_cond = dim * 4)
             ff = AdaptiveWrapper(ff, dim = dim, dim_cond = dim * 4)
 
-            attn_residual = init_residual_fn(dim = dim, layer_index = next(counter))
-            ff_residual = init_residual_fn(dim = dim, layer_index = next(counter))
+            attn_res = AttentionResidual(dim = dim)
 
-            layers.append(ModuleList([skip_proj, attn, attn_residual, ff, ff_residual]))
+            layers.append(ModuleList([skip_proj, attn, ff, attn_res]))
 
         self.layers = layers
         self.norm = RMSNorm(dim)
@@ -1147,7 +1170,9 @@ class Transformer(Module):
             assert exists(decode_length)
 
             x = x[..., -decode_length:, :]
-            cond = cond[..., -decode_length:, :]
+
+            if exists(cond):
+                cond = cond[..., -decode_length:, :]
 
             if is_tensor(is_any_modality):
                 is_any_modality = is_any_modality[..., -decode_length:]
@@ -1165,21 +1190,17 @@ class Transformer(Module):
         cache = default(cache, (None,))
         iter_cache = iter(cache)
 
-        # expand input into multiple residual streams for maybe hyper connection
-
-        x = self.expand_stream(x)
-
         # transformer layers as usual, using mask from above
 
         skips = []
         value_residual = None
 
         new_cache = []
-        hiddens = []
+        hiddens = [x]
 
         depth = len(self.layers)
 
-        for ind, (skip_proj, attn, attn_residual, ff, ff_residual) in enumerate(self.layers):
+        for ind, (skip_proj, attn, ff, attn_res) in enumerate(self.layers):
             layer = ind + 1
 
             # skip connection
@@ -1199,8 +1220,6 @@ class Transformer(Module):
 
             # attention and feedforward
 
-            x, add_attn_residual = attn_residual(x)
-
             (attn_out, attn_values), kv_cache = attn(
                 x,
                 rotary_emb = rotary_emb,
@@ -1216,20 +1235,15 @@ class Transformer(Module):
 
             new_cache.append(kv_cache)
 
-            x = add_attn_residual(attn_out)
-
-            x, add_ff_residual = ff_residual(x)
+            x = attn_out + x
 
             ff_out = ff(x, **adaptive_kwargs)
 
-            x = add_ff_residual(ff_out)
+            x = ff_out + x
 
-            if return_hiddens:
-                hiddens.append(x)
+            hiddens.append(x)
 
-        # reduce multiple residual streams for maybe hyper connection
-
-        x = self.reduce_stream(x)
+            x = attn_res(hiddens)
 
         assert len(skips) == 0
 
@@ -1332,7 +1346,7 @@ class Transfusion(Module):
 
         # default `modality_num_dim` to `len(modality_default_shape)` if latter is specified but former not
 
-        modality_num_dim = default(modality_num_dim, tuple(len(shape) for shape in self.modality_default_shape))
+        modality_num_dim = default(modality_num_dim, tuple(len(shape) if exists(shape) else None for shape in self.modality_default_shape))
 
         # specifying the number of dimensions for the modality, which will be hard validated
 
@@ -1626,7 +1640,7 @@ class Transfusion(Module):
         self,
         prompt: ModalitySample | Tensor | tuple[int, Float['...']] | None = None,
         max_length = 2048,
-        text_temperature = 1.5,
+        text_temperature = 1.0,
         text_min_p = 0.1,
         cache_kv = False,
         fixed_modality_shape: tuple[int, ...] | None = None,
@@ -1781,9 +1795,10 @@ class Transfusion(Module):
                     if text_is_greedy:
                         sampled = logits.argmax(dim = -1, keepdim = True)
                     else:
+                        logits = logits / text_temperature
                         logits = min_p_filter(logits, min_p = text_min_p)
 
-                        probs = (logits / text_temperature).softmax(dim = -1)
+                        probs = logits.softmax(dim = -1)
                         sampled = torch.multinomial(probs, 1)
 
                     seq = torch.cat((seq, sampled), dim = -1)
@@ -1966,10 +1981,15 @@ class Transfusion(Module):
         text = text.masked_fill(text == -1, 0)
         tokens = self.text_embed(text)
 
+        # handle cache and tokens_seen
+
+        raw_cache, tokens_seen = default(cache, (None, 0))
+
         # rotary
 
         seq_len = tokens.shape[-2]
-        pos = torch.arange(seq_len, device = device)
+
+        pos = torch.arange(tokens_seen, tokens_seen + seq_len, device = device)
 
         rotary_emb = self.rotary_emb(pos)
 
@@ -1979,13 +1999,14 @@ class Transfusion(Module):
             tokens,
             rotary_emb = rotary_emb,
             causal_mask = True,
-            cache = cache,
+            cache = raw_cache,
+            decode_length = seq_len if exists(raw_cache) else None,
             return_kv_cache = return_kv_cache,
             return_hiddens = True
         )
 
         embed, hiddens, *maybe_kv_cache = transformer_out
-        kv_cache = maybe_kv_cache[0] if return_kv_cache else None
+        kv_cache = (maybe_kv_cache[0], tokens_seen + seq_len) if return_kv_cache else None
 
         # text unembedding
 
@@ -2022,24 +2043,39 @@ class Transfusion(Module):
         self,
         prompt: Int['b n'],
         seq_len: int,
-        temperature = 1.5,
+        temperature = 1.0,
         min_p = 0.1,
+        cache_kv = True
     ) -> Int['b no']:
 
         prompt_seq_len, out = prompt.shape[-1], prompt.clone()
         sample_num_times = max(0, seq_len - prompt_seq_len)
 
+        curr_out = out
+        cache = None
+
         for _ in tqdm(range(sample_num_times)):
-            logits = self.forward_text(out, return_loss = False)
+            logits, next_cache = self.forward_text(curr_out, return_loss = False, return_kv_cache = True, cache = cache)
+
+            if cache_kv:
+                cache = next_cache
+
             logits = logits[:, -1]
 
-            logits = min_p_filter(logits, min_p = min_p)
-
-            logits.masked_fill_(~self.text_only_logits_mask, max_neg_value(logits))
-
-            sample = gumbel_sample(logits, temperature = temperature, dim = -1)
+            if temperature == 0.:
+                sample = logits.argmax(dim = -1, keepdim = True)
+            else:
+                logits = logits / temperature
+                logits = min_p_filter(logits, min_p = min_p)
+                logits.masked_fill_(~self.text_only_logits_mask, max_neg_value(logits))
+                sample = gumbel_sample(logits, dim = -1)
 
             out = cat((out, sample), dim = -1)
+
+            if cache_kv:
+                curr_out = sample
+            else:
+                curr_out = out
 
         return out[..., prompt_seq_len:]
 
@@ -2746,18 +2782,12 @@ class Transfusion(Module):
 
         tokens = einx.where('b n, b n d, b n d', is_any_modality, modality_tokens, text_tokens)
 
-        # derive rotary positions
-
-        rotary_positions = derive_rotary_positions_from_modality_positions(seq_len, modality_positions)
-
-        rotary_emb = self.rotary_emb(rotary_positions)
-        rotary_emb = rearrange(rotary_emb, 'b n d -> b 1 n d')
-
         # take care of cache
 
+        raw_cache, tokens_seen = default(cache, (None, 0))
         is_any_modality_when_decoding = None
 
-        if exists(cache):
+        if exists(raw_cache):
             assert exists(decode_length), '`decode_length` must be passed in on forward for modality sampling. think of a cleaner way on some future date'
             assert exists(decoding_text_or_modality)
 
@@ -2766,6 +2796,16 @@ class Transfusion(Module):
 
             is_any_modality_when_decoding = decoding_text_or_modality == 'modality'
             modality_positions = None
+
+        # derive rotary positions
+
+        if exists(raw_cache):
+            rotary_positions = torch.arange(tokens_seen, tokens_seen + decode_length, device = device)
+            rotary_emb = self.rotary_emb(rotary_positions)
+        else:
+            rotary_positions = derive_rotary_positions_from_modality_positions(seq_len, modality_positions)
+            rotary_emb = self.rotary_emb(rotary_positions)
+            rotary_emb = rearrange(rotary_emb, 'b n d -> b 1 n d')
 
         # times
 
@@ -2781,13 +2821,13 @@ class Transfusion(Module):
             rotary_emb = rotary_emb,
             modality_positions = modality_positions,
             is_any_modality = is_any_modality_when_decoding,
-            cache = cache,
+            cache = raw_cache,
             decode_length = decode_length,
             return_hiddens = True,
             return_kv_cache = return_kv_cache
         )
 
-        kv_cache = maybe_kv_cache[0] if return_kv_cache else None
+        kv_cache = (maybe_kv_cache[0], tokens_seen + (decode_length if exists(decode_length) else seq_len)) if return_kv_cache else None
 
         # helper for appending auxiliary returns
 

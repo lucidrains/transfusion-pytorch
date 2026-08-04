@@ -24,13 +24,11 @@ from transfusion_pytorch.transfusion import (
 
 @pytest.mark.parametrize('cache_kv', (False, True))
 @pytest.mark.parametrize('use_flex_attn', (False, True))
-@pytest.mark.parametrize('num_residual_streams', (1, 4))
 @pytest.mark.parametrize('reconstruction_loss_weight', (0., 0.1))
 @pytest.mark.parametrize('model_output_clean', (False, True))
 def test_transfusion(
     cache_kv: bool,
     use_flex_attn: bool,
-    num_residual_streams: int,
     reconstruction_loss_weight: float,
     model_output_clean: bool
 ):
@@ -50,8 +48,7 @@ def test_transfusion(
         transformer = dict(
             dim = 16,
             depth = 1,
-            use_flex_attn = use_flex_attn,
-            num_residual_streams = num_residual_streams
+            use_flex_attn = use_flex_attn
         ),
     )
 
@@ -399,8 +396,7 @@ def test_zero_dimensional():
         modality_default_shape = (),
         transformer = dict(
             dim = 16,
-            depth = 1,
-            num_residual_streams = 1
+            depth = 1
         )
     )
 
@@ -426,8 +422,7 @@ def test_self_flow():
         modality_default_shape = (),
         transformer = dict(
             dim = 16,
-            depth = 1,
-            num_residual_streams = 1
+            depth = 1
         )
     )
 
@@ -537,8 +532,7 @@ def test_e2e_self_flow_with_cfg():
         modality_default_shape = (4,),
         transformer = dict(
             dim = 16,
-            depth = 1,
-            num_residual_streams = 1
+            depth = 1
         )
     )
 
@@ -561,3 +555,44 @@ def test_e2e_self_flow_with_cfg():
     wrapper.update_teacher()
 
     assert total_loss.ndim == 0
+
+def test_generate_text_only():
+    model = Transfusion(
+        num_text_tokens = 256,
+        transformer = dict(
+            dim = 16,
+            depth = 2,
+            dim_head = 8,
+            heads = 2
+        )
+    ).eval()
+
+    prompt = torch.randint(0, 256, (1, 8))
+
+    sampled_cached = model.generate_text_only(prompt, 24, temperature = 0., cache_kv = True)
+    sampled_uncached = model.generate_text_only(prompt, 24, temperature = 0., cache_kv = False)
+
+    assert sampled_cached.shape == (1, 16)
+    assert torch.equal(sampled_cached, sampled_uncached)
+
+def test_sample_cache_kv_equivalence():
+    model = Transfusion(
+        num_text_tokens = 256,
+        modality_default_shape = (4,),
+        transformer = dict(
+            dim = 16,
+            depth = 2,
+            dim_head = 8,
+            heads = 2
+        )
+    ).eval()
+
+    prompt = torch.randint(0, 256, (1, 8))
+
+    torch.manual_seed(42)
+    sampled_cached = model.sample(prompt = prompt, max_length = 16, cache_kv = True, text_temperature = 0.)
+
+    torch.manual_seed(42)
+    sampled_uncached = model.sample(prompt = prompt, max_length = 16, cache_kv = False, text_temperature = 0.)
+
+    assert torch.equal(sampled_cached[0], sampled_uncached[0])
