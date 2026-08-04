@@ -596,3 +596,67 @@ def test_sample_cache_kv_equivalence():
     sampled_uncached = model.sample(prompt = prompt, max_length = 16, cache_kv = False, text_temperature = 0.)
 
     assert torch.equal(sampled_cached[0], sampled_uncached[0])
+
+def test_e2e_multiple_modalities_interleaved():
+    model = Transfusion(
+        num_text_tokens = 16,
+        dim_latent = (16, 16),
+        modality_default_shape = ((4,), (3, 3)),
+        transformer = dict(
+            dim = 16,
+            depth = 2,
+            dim_head = 8,
+            heads = 2
+        )
+    ).eval()
+
+    mod0 = model.get_modality_info(0)
+    mod1 = model.get_modality_info(1)
+
+    prompt = [
+        randint(0, 16, (3,)),
+        tensor([model.meta_id]),
+        model.char_tokenizer('4'),
+        tensor([mod0.som_id]),
+        (0, randn(4, 16)),
+        tensor([mod0.eom_id]),
+        randint(0, 16, (2,)),
+        tensor([model.meta_id]),
+        model.char_tokenizer('3,3'),
+        tensor([mod1.som_id]),
+        (1, randn(3, 3, 16)),
+        tensor([mod1.eom_id]),
+        randint(0, 16, (2,))
+    ]
+
+    torch.manual_seed(42)
+
+    sampled_cached = model.sample(
+        prompt = prompt,
+        max_length = 10,
+        cache_kv = True,
+        text_temperature = 0.,
+        modality_steps = 2
+    )
+
+    torch.manual_seed(42)
+
+    sampled_uncached = model.sample(
+        prompt = prompt,
+        max_length = 10,
+        cache_kv = False,
+        text_temperature = 0.,
+        modality_steps = 2
+    )
+
+    assert len(sampled_cached) == len(sampled_uncached)
+
+    for item_cached, item_uncached in zip(sampled_cached, sampled_uncached):
+        if isinstance(item_cached, tuple):
+            type_c, tensor_c = item_cached
+            type_u, tensor_u = item_uncached
+
+            assert type_c == type_u
+            assert torch.allclose(tensor_c, tensor_u, atol = 1e-4)
+        else:
+            assert torch.equal(item_cached, item_uncached)

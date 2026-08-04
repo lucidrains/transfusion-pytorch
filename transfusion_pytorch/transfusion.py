@@ -28,7 +28,6 @@ from torch import nn, Tensor, tensor, is_tensor, cat, stack
 from torch.nn import Module, ModuleList, Linear
 
 from torch.utils.data import Dataset, DataLoader
-from torch.nn.utils.rnn import pad_sequence
 from torch.utils._pytree import tree_map, tree_flatten, tree_unflatten
 
 from torchdiffeq import odeint
@@ -52,10 +51,9 @@ from torch_einops_utils import (
     tree_map_tensor_to_device,
     temp_eval,
     reverse_cumsum,
-    pad_at_dim
+    pad_at_dim,
+    pad_sequence
 )
-
-pad_sequence = partial(pad_sequence, batch_first = True)
 
 # tensor typing
 
@@ -353,8 +351,8 @@ def modality_positions_to_tensor(
     device = None
 ) -> Int['b m 2'] | Int['b m 3']:
 
-    modalities: list[Tensor] = [tensor(modality, device = device) for modality in modalities]
-    modalities = pad_sequence(modalities, padding_value = pad_value)
+    modalities: list[Tensor] = [rearrange(tensor(modality, device = device), '... d -> (...) d') if len(modality) > 0 else torch.empty((0, 3), device = device, dtype = torch.long) for modality in modalities]
+    modalities = pad_sequence(modalities, dim = -2, value = pad_value)
 
     if modalities.ndim == 2:
         modalities = modalities.reshape(*modalities.shape, 3)
@@ -391,10 +389,17 @@ def derive_rotary_positions_from_modality_positions(
 
     device = modalities.device
 
-    modality_mask = modality_positions_to_is_modality_mask(seq_len, modalities, offset = torch.tensor([1, -1]))
-    is_any_modality = reduce(modality_mask, 'b t m n -> b n', 'any')
+    _, offsets, lengths = modalities.unbind(dim = -1)
+    seq = torch.arange(seq_len, device = device)
 
-    return torch.arange(seq_len, device = device) - is_any_modality.cumsum(dim = -1)
+    is_extra_modality_token = (
+        einx.greater('i, b m -> b m i', seq, offsets) &
+        einx.less('j, b m -> b m j', seq, offsets + lengths)
+    )
+
+    is_any_extra = reduce(is_extra_modality_token, 'b m n -> b n', 'any')
+
+    return seq - is_any_extra.cumsum(dim = -1)
 
 # modality tokens are given as list of tensors, can be then be embedded into the modality tokens for attending alongside text tokens
 
@@ -1154,7 +1159,7 @@ class Transformer(Module):
 
                 if should_use_flex_attn:
                     transfusion_mask_fn = transfusion_attn_mask(modality_positions)
-                    block_mask = create_block_mask(transfusion_mask_fn, B = None, H = None, Q_LEN = seq_len, KV_LEN = seq_len, _compile = True, device = device)
+                    block_mask = create_block_mask(transfusion_mask_fn, B = batch, H = None, Q_LEN = seq_len, KV_LEN = seq_len, _compile = True, device = device)
                     attn_mask_kwargs.update(block_mask = block_mask)
                 else:
                     attn_mask = naive_attn_mask(seq_len, modality_positions, device = device)
@@ -2692,9 +2697,9 @@ class Transfusion(Module):
         if return_loss:
             total_tokens = sum([t.numel() for t in text])
 
-        text = pad_sequence(text, padding_value = -1)
+        text = pad_sequence(text, value = -1)
 
-        modality_tokens = pad_sequence(modality_tokens, padding_value = 0.)
+        modality_tokens = pad_sequence(modality_tokens, dim = -2, value = 0.)
 
         # handle modality positional embedding
 
@@ -2727,7 +2732,7 @@ class Transfusion(Module):
 
                 evaluated_pos_emb.append(cat(evaluated_batch_pos_emb, dim = -2))
 
-            modality_pos_emb = pad_sequence(evaluated_pos_emb, padding_value = 0.)
+            modality_pos_emb = pad_sequence(evaluated_pos_emb, dim = -2, value = 0.)
 
         # handle training mode and removal of last token
 
@@ -2800,11 +2805,21 @@ class Transfusion(Module):
         # derive rotary positions
 
         if exists(raw_cache):
-            rotary_positions = torch.arange(tokens_seen, tokens_seen + decode_length, device = device)
-            rotary_emb = self.rotary_emb(rotary_positions)
+            if is_any_modality_when_decoding:
+                # all tokens in a modality instance share the exact same rotary position
+
+                rotary_positions = torch.full((decode_length,), tokens_seen, device = device, dtype = torch.long)
+                next_tokens_seen = tokens_seen + 1
+            else:
+                rotary_positions = torch.arange(tokens_seen, tokens_seen + decode_length, device = device)
+                next_tokens_seen = tokens_seen + decode_length
         else:
-            rotary_positions = derive_rotary_positions_from_modality_positions(seq_len, modality_positions)
-            rotary_emb = self.rotary_emb(rotary_positions)
+            rotary_positions = derive_rotary_positions_from_modality_positions(seq_len, modality_positions) + tokens_seen
+            next_tokens_seen = (rotary_positions[..., -1].max() + 1).item()
+
+        rotary_emb = self.rotary_emb(rotary_positions)
+
+        if rotary_emb.ndim == 3:
             rotary_emb = rearrange(rotary_emb, 'b n d -> b 1 n d')
 
         # times
@@ -2827,7 +2842,7 @@ class Transfusion(Module):
             return_kv_cache = return_kv_cache
         )
 
-        kv_cache = (maybe_kv_cache[0], tokens_seen + (decode_length if exists(decode_length) else seq_len)) if return_kv_cache else None
+        kv_cache = (maybe_kv_cache[0], next_tokens_seen) if return_kv_cache else None
 
         # helper for appending auxiliary returns
 
