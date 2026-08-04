@@ -271,8 +271,7 @@ def get_tokens_since_rightmost_id(
     if not mask.any():
         return t[0:0] # return empty tensor if no id found
 
-    reverse_cumsum = mask.flip(dims = (0,)).cumsum(dim = 0).flip(dims = (0,))
-    after_right_mask = reverse_cumsum == 0
+    after_right_mask = reverse_cumsum(mask.int(), dim = 0) == 0
     return t[after_right_mask]
 
 # tensor helpers
