@@ -715,3 +715,190 @@ def test_processing_channel_first_equivalence():
     times = torch.ones(len(batch), 3)
 
     assert_strategies_equivalent(model, batch, times, need_axial_pos_emb = False, return_loss = True, return_embed = False)
+
+# sample_many - batched sampling
+# `sample_many` decodes a batch of samples concurrently, each walking the same state machine as
+# `sample_one`, and must produce the same samples (modalities up to float noise, text exactly)
+
+def make_sampling_model(
+    num_modalities = 1,
+    channel_first = False,
+    **kwargs
+):
+    if num_modalities == 1:
+        model = Transfusion(
+            num_text_tokens = 16,
+            dim_latent = 8,
+            channel_first_latent = channel_first,
+            modality_default_shape = (4, 4) if channel_first else (4,),
+            transformer = dict(
+                dim = 16,
+                depth = 2,
+                dim_head = 8,
+                heads = 2
+            ),
+            **kwargs
+        )
+    else:
+        model = Transfusion(
+            num_text_tokens = 16,
+            dim_latent = (8, 16),
+            modality_default_shape = ((4,), (3, 3)),
+            transformer = dict(
+                dim = 16,
+                depth = 2,
+                dim_head = 8,
+                heads = 2
+            ),
+            **kwargs
+        )
+
+    return model.eval()
+
+def assert_sample_equivalence(model, prompt_batch, **kwargs):
+    # `sample_many` must produce the same samples as `sample_one` run per prompt, with fixed
+    # noise and greedy text decoding
+
+    kwargs.setdefault('text_temperature', 0.)
+    kwargs.setdefault('modality_steps', 4)
+
+    cache_kv = kwargs.pop('cache_kv', True) # `sample_many` always uses the kv cache
+
+    outs_one = [model.sample_one(prompt, cache_kv = cache_kv, **kwargs) for prompt in prompt_batch]
+    outs_many = model.sample_many(prompt_batch, **kwargs)
+
+    assert len(outs_one) == len(outs_many)
+
+    for one, many in zip(outs_one, outs_many):
+        assert len(one) == len(many)
+
+        for one_part, many_part in zip(one, many):
+            if isinstance(one_part, tuple):
+                one_type, one_tensor = one_part
+                many_type, many_tensor = many_part
+
+                assert one_type == many_type
+                assert torch.allclose(one_tensor, many_tensor, atol = 1e-4)
+            else:
+                assert torch.equal(one_part, many_part)
+
+@pytest.mark.parametrize('cfg_scale', (1., 3.))
+@pytest.mark.parametrize('channel_first', (False, True))
+def test_sample_many_equivalent_to_sample_one(cfg_scale, channel_first):
+    model = make_sampling_model(channel_first = channel_first)
+
+    noise = torch.randn(32 if channel_first else 16, 8)
+    prime = tensor([model.som_ids[0]])
+    text_1 = randint(0, 16, (3,))
+    text_2 = randint(0, 16, (2,))
+
+    prompt_batches = [
+        [[prime], [prime]],
+        [[text_1], [text_2]],
+        [[text_1], [text_2], [prime]]
+    ]
+
+    for prompt_batch in prompt_batches:
+        assert_sample_equivalence(
+            model,
+            prompt_batch,
+            init_modality_noise = noise,
+            max_length = 16,
+            cfg_scale = cfg_scale
+        )
+
+def test_sample_many_batched_multimodal():
+    # heterogeneous batch - different modality types, shapes and latent dims, decoded
+    # concurrently in one joint odeint trajectory
+
+    model = make_sampling_model(num_modalities = 2)
+
+    noise = torch.randn(32, 16)
+    prime_0 = tensor([model.som_ids[0]])
+    prime_1 = tensor([model.som_ids[1]])
+
+    outs = model.sample_many(
+        [[prime_0], [prime_1], [prime_0]],
+        init_modality_noise = noise,
+        max_length = 16,
+        text_temperature = 0.,
+        cfg_scale = 3.,
+        modality_steps = 4
+    )
+
+    assert len(outs) == 3
+
+    for sample in outs:
+        assert isinstance(sample[1], tuple)
+        assert sample[1][1].shape in ((4, 8), (3, 3, 16))
+
+def test_sample_many_modality_prompt():
+    model = make_sampling_model()
+
+    img = randn(4, 8)
+
+    outs = model.sample_many([(0, img), (0, img)], max_length = 10, text_temperature = 0., cfg_scale = 1.)
+
+    assert len(outs) == 2
+
+    for sample in outs:
+        assert len(sample) == 3
+        assert isinstance(sample[1], tuple)
+        assert torch.allclose(sample[1][1], img)
+
+def test_sample_many_encoder_decoder():
+    mock_encoder = nn.Conv2d(3, 8, 3, padding = 1)
+    mock_decoder = nn.Conv2d(8, 3, 3, padding = 1)
+
+    model = Transfusion(
+        num_text_tokens = 16,
+        dim_latent = 8,
+        channel_first_latent = True,
+        modality_default_shape = (4, 4),
+        modality_encoder = mock_encoder,
+        modality_decoder = mock_decoder,
+        transformer = dict(
+            dim = 16,
+            depth = 2,
+            dim_head = 8,
+            heads = 2
+        )
+    ).eval()
+
+    img = randn(3, 8, 8)
+
+    outs = model.sample_many([(0, img), (0, img)], max_length = 20, text_temperature = 0., cfg_scale = 1., modality_steps = 4)
+
+    assert len(outs) == 2
+
+    for sample in outs:
+        assert isinstance(sample[1], tuple)
+        assert sample[1][1].shape == (3, 8, 8)
+
+def test_sample_many_empty_and_mixed_prompts():
+    model = make_sampling_model()
+
+    prime = tensor([model.som_ids[0]])
+
+    outs = model.sample_many([None, None], max_length = 6, text_temperature = 0., cfg_scale = 1.)
+    assert len(outs) == 2
+
+    outs = model.sample_many([[None], [prime]], max_length = 12, text_temperature = 0., cfg_scale = 1., modality_steps = 4)
+    assert len(outs) == 2
+    assert isinstance(outs[1][1], tuple)
+
+def test_sample_many_stochastic_text_distribution():
+    # with temperature > 0 the sampled text should vary across runs
+
+    model = make_sampling_model()
+
+    prime = tensor([model.som_ids[0]])
+    noise = torch.randn(16, 8)
+
+    torch.manual_seed(0)
+    outs_1 = model.sample_many([[prime]], init_modality_noise = noise, max_length = 20, text_temperature = 1.0, cfg_scale = 1., modality_steps = 4)
+
+    torch.manual_seed(1)
+    outs_2 = model.sample_many([[prime]], init_modality_noise = noise, max_length = 20, text_temperature = 1.0, cfg_scale = 1., modality_steps = 4)
+
+    assert not torch.equal(outs_1[0][-1], outs_2[0][-1])

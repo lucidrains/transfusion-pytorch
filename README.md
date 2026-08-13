@@ -134,6 +134,45 @@ one_multimodal_sample = model.sample()
 print_modality_sample(one_multimodal_sample)
 ```
 
+Sampling a batch of interleaved text + modality samples in parallel, with `sample_many`
+
+`sample_many` decodes an entire batch of samples concurrently: all samples currently decoding text
+share a single kv-cached forward pass, and all samples currently decoding a modality share a single
+joint `odeint` trajectory (one forward pass per ode evaluation, with each sample keeping its own
+shape, length and modality type). `sample_one` walks each sample through the same state machine
+serially - `sample_many` is the batched equivalent.
+
+```python
+import torch
+from transfusion_pytorch import Transfusion
+
+model = Transfusion(
+    num_text_tokens = 256,
+    dim_latent = 384,
+    modality_default_shape = (4,),
+    transformer = dict(
+        dim = 512,
+        depth = 8
+    )
+)
+
+# a batch is a list of prompts, each taking the same form as the `prompt` of `sample_one` -
+# a list of text tensors / (modality_type, tensor) tuples, a raw tensor or tuple, or `None`
+
+prompts = [
+    torch.randint(0, 256, (16,)),                                   # raw text prompt
+    (0, torch.randn(4, 384)),                                       # raw modality prompt
+    None,                                                           # empty prompt
+    [torch.randint(0, 256, (8,)), (0, torch.randn(6, 384))],        # interleaved text + modality
+]
+
+samples = model.sample_many(prompts, max_length = 2048, cfg_scale = 3.)
+```
+
+the samples come back as a list of `ModalitySample`s, one per prompt. the kv cache is always used
+(the `cache_kv = True` code path of `sample_one`), and each sample keeps its own max length budget,
+so one sample finishing early does not hold up the rest of the batch.
+
 To pretrain on language first, just pass in your text as type `Int['batch seq']`
 
 ```python
