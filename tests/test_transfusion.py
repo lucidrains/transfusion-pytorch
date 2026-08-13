@@ -660,3 +660,58 @@ def test_e2e_multiple_modalities_interleaved():
             assert torch.allclose(tensor_c, tensor_u, atol = 1e-4)
         else:
             assert torch.equal(item_cached, item_uncached)
+
+def test_processing_equivalence():
+    # every modality processing strategy must produce identical results
+
+    from transfusion_pytorch.modality_processing import assert_strategies_equivalent
+
+    model = Transfusion(
+        num_text_tokens = 8,
+        dim_latent = 16,
+        modality_default_shape = (4, 4),
+        model_output_clean = False,
+        transformer = dict(
+            dim = 16,
+            depth = 1
+        )
+    ).eval()
+
+    batch = [
+        [randint(0, 8, (7,)), (0, randn(4, 4, 16)), randint(0, 8, (11,)), randint(0, 8, (3,))],
+        [randint(0, 8, (2,)), (0, randn(4, 4, 16)), randint(0, 8, (19,)), (0, randn(4, 4, 16)), randint(0, 8, (5,))]
+    ]
+
+    times = torch.ones(len(batch), 2)
+
+    assert_strategies_equivalent(model, batch, times, need_axial_pos_emb = False, return_loss = True, return_embed = False)
+
+    # decoding path (no meta tokens)
+
+    assert_strategies_equivalent(model, batch, times, need_axial_pos_emb = False, return_loss = False, return_embed = True)
+
+def test_processing_channel_first_equivalence():
+    # same, for channel first latents - exercises the per-instance singleton branch
+
+    from transfusion_pytorch.modality_processing import assert_strategies_equivalent
+
+    model = Transfusion(
+        num_text_tokens = 8,
+        dim_latent = 16,
+        modality_default_shape = (4, 4),
+        channel_first_latent = True,
+        model_output_clean = False,
+        transformer = dict(
+            dim = 16,
+            depth = 1
+        )
+    ).eval()
+
+    batch = [
+        [randint(0, 8, (7,)), (0, randn(16, 4, 4)), randint(0, 8, (11,)), (0, randn(16, 5, 6)), (0, randn(16, 4, 4))],
+        [randint(0, 8, (2,)), (0, randn(16, 6, 6)), (0, randn(16, 4, 4)), randint(0, 8, (19,)), randint(0, 8, (5,))]
+    ]
+
+    times = torch.ones(len(batch), 3)
+
+    assert_strategies_equivalent(model, batch, times, need_axial_pos_emb = False, return_loss = True, return_embed = False)

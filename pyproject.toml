@@ -1,6 +1,6 @@
 [project]
 name = "transfusion-pytorch"
-version = "0.18.1"
+version = "0.19.0"
 description = "Transfusion in Pytorch"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }
@@ -55,16 +55,6 @@ examples = [
 ]
 test = [
     "pytest",
-]
-
-[tool.ruff]
-line-length = 1000
-
-lint.ignore = [
-    "F722", # for jaxtyping shape annotation
-    "F401",
-    "F821",
-    "E402"
 ]
 
 [tool.pytest.ini_options]

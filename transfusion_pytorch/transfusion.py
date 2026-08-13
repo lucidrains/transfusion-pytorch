@@ -24,7 +24,7 @@ from typing import NamedTuple, Callable, Literal
 
 import torch
 import torch.nn.functional as F
-from torch import nn, Tensor, tensor, is_tensor, cat, stack
+from torch import nn, Tensor, tensor, is_tensor, cat, stack, matmul
 from torch.nn import Module, ModuleList, Linear
 
 from torch.utils.data import Dataset, DataLoader
@@ -52,7 +52,17 @@ from torch_einops_utils import (
     temp_eval,
     reverse_cumsum,
     pad_at_dim,
-    pad_sequence
+    pad_sequence,
+    batched_index_select
+)
+
+from .modality_processing import (
+    ModalitySample,
+    GetPredFlows,
+    get_model_output_to_flow_fn,
+    evaluate_modality_pos_emb,
+    DEFAULT_PROCESSING_STRATEGY,
+    get_processing_strategy
 )
 
 # tensor typing
@@ -88,13 +98,9 @@ except ImportError:
 
 Scalar = Float['']
 
-ModalitySample = list[Int[''] | Int['_'] | Float['...'] | tuple[int, Float['...']]]
-
 ModalityTokenTransform = str | Callable | None
 
 RawModalityPositions = list[list[tuple[int, int, int]]]
-
-GetPredFlows = dict[int, list[Callable[[Tensor], Tensor]]]
 
 class LossBreakdown(NamedTuple):
     total: Scalar
@@ -374,7 +380,7 @@ def order_modality_positions_by_seq_offset(
 
     # sort by ascending offset
 
-    modalities = einx.get_at('b [mi] ..., b mo -> b mo ...', modalities, sorted_indices)
+    modalities = batched_index_select(modalities, sorted_indices)
     return modalities, sorted_indices
 
 # deriving relative positions from modality positions
@@ -610,35 +616,7 @@ def apply_fn_modality_type(
 
     return tree_unflatten(out, tree_spec)
 
-# decorator for model output to flow
-
-def get_model_output_to_flow_fn(
-    noised: Tensor,
-    times: Tensor,
-    eps = 5e-2,
-    return_decorator = False
-):
-    if times.ndim == 0:
-        times = rearrange(times, '-> 1')
-
-    def to_flow(out):
-        nonlocal noised
-        noised = noised.reshape_as(out)
-        padded_times = append_dims(times, out.ndim - 1)
-
-        flow = (out - noised) / (1. - padded_times).clamp_min(eps)
-        return flow
-
-    if not return_decorator:
-        return to_flow
-
-    def decorator(fn):
-        def inner(embed, *args, **kwargs):
-            out = fn(embed, *args, **kwargs)
-            return to_flow(out)
-        return inner
-
-    return decorator
+# modality processing strategies live in `modality_processing.py`, pickable via `Transfusion(..., modality_processing = ...)`
 
 # sampling related functions
 
@@ -851,7 +829,15 @@ class AttentionResidual(Module):
         values = hiddens
         keys = self.norm_keys(values)
 
-        sim = einsum(self.pseudo_queries, keys, 'd, l ... d -> ... l') * self.scale
+        # sim[b, n, l] = sum_d pseudo_queries[d] * keys[l, b, n, d]
+        # `torch.mv` instead of einsum - the ellipsis einsum path has been observed to
+        # read garbage for these shapes, producing nan
+
+        keys, unpack_keys = pack_with_inverse(keys, '* d')
+
+        sim = torch.mv(keys, self.pseudo_queries)
+        sim = unpack_keys(rearrange(sim, 'n -> n 1'))
+        sim = rearrange(sim, 'l b n 1 -> b n l') * self.scale
 
         # attention and aggregate
 
@@ -895,7 +881,8 @@ class Attention(Module):
         gate_values = True,
         laser = False,
         laser_softclamp_value = 15.,
-        learned_value_residual_mix = False
+        learned_value_residual_mix = False,
+        qk_rmsnorm = True
     ):
         super().__init__()
         self.scale = dim_head ** -0.5
@@ -908,6 +895,14 @@ class Attention(Module):
             Linear(dim, dim_inner * 2, bias = False),
             Rearrange('b n (qk h d) -> qk b h n d', qk = 2, h = heads)
         )
+
+        # qk rmsnorm keeps the attention logits bounded regardless of the magnitude of the
+        # inputs (text tokens, noised modalities, previously decoded modalities all share
+        # one sequence), preventing attention from blowing up into nan during sampling
+
+        self.qk_rmsnorm = qk_rmsnorm
+        self.q_norm = RMSNorm(dim_head)
+        self.k_norm = RMSNorm(dim_head)
 
         self.to_v = nn.Sequential(
             Linear(dim, dim_inner, bias = False),
@@ -965,6 +960,12 @@ class Attention(Module):
         # project to queries, keys, values
 
         q, k, v = (*self.to_qk(x), self.to_v(x))
+
+        # qk rmsnorm - normalize queries and keys separately so attention logits stay bounded
+
+        if self.qk_rmsnorm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
 
         # value residual
 
@@ -1068,10 +1069,14 @@ class Transformer(Module):
         ff_kwargs: dict = dict(),
         attn_laser = False,
         unet_skips = True,
-        use_flex_attn = False
+        use_flex_attn = False,
+        qk_rmsnorm = True,
+        use_value_residual = False
     ):
         super().__init__()
+
         self.use_flex_attn = use_flex_attn
+        self.use_value_residual = use_value_residual
 
         self.dim = dim
         self.dim_head = dim_head
@@ -1093,7 +1098,7 @@ class Transformer(Module):
 
             skip_proj = Linear(dim * 2, dim, bias = False) if is_latter_half and unet_skips else None
 
-            attn = Attention(dim = dim, dim_head = dim_head, heads = heads, dropout = dropout, use_flex_attn = use_flex_attn, learned_value_residual_mix = not is_first, laser = attn_laser, **attn_kwargs)
+            attn = Attention(dim = dim, dim_head = dim_head, heads = heads, dropout = dropout, use_flex_attn = use_flex_attn, learned_value_residual_mix = not is_first and use_value_residual, laser = attn_laser, qk_rmsnorm = qk_rmsnorm, **attn_kwargs)
 
             ff = FeedForward(dim = dim, expansion_factor = ff_expansion_factor, **ff_kwargs)
 
@@ -1236,7 +1241,7 @@ class Transformer(Module):
                 **adaptive_kwargs
             )
 
-            value_residual = default(value_residual, attn_values)
+            value_residual = default(value_residual, attn_values) if self.use_value_residual else None
 
             new_cache.append(kv_cache)
 
@@ -1302,9 +1307,13 @@ class Transfusion(Module):
             method = 'midpoint'
         ),
         eps = 1e-2,
-        prob_uncond = 0.1
+        prob_uncond = 0.1,
+        modality_processing: str = DEFAULT_PROCESSING_STRATEGY # which strategy to use for processing a batch of interspersed text + modalities, see `PROCESSING_STRATEGIES` in `modality_processing.py`
     ):
         super().__init__()
+
+        self.modality_processing = modality_processing
+        get_processing_strategy(modality_processing) # validate early
 
         # transformer
 
@@ -2485,254 +2494,34 @@ class Transfusion(Module):
                     encode_fn.eval()
                     modalities = apply_fn_modality_type(encode_fn, modalities, modality_type = mod.modality_type)
 
-        # for parsing out the predicted flow from flattened sequence of tokens coming out of transformer
-
-        flows = defaultdict(list) # store flows for loss
-
-        get_pred_flows: GetPredFlows = defaultdict(list) # functions for parsing modalities from Float['b n d'] for model back to latents or pixel space
-
-        def model_to_pred_flow(batch_index, start_index, modality_length, unpack_fn):
-
-            def inner(embed: Float['b n d'], need_splice = True) -> Float['...']:
-                embed = embed[batch_index]
-
-                if need_splice:
-                    if embed.shape[0] < (start_index + modality_length):
-                        embed = embed[-modality_length:]
-                    else:
-                        embed = embed[start_index:(start_index + modality_length)]
-
-                embed = unpack_fn(embed)
-                return embed
-
-            return inner
-
-        # for going from predicted flow -> reconstruction
-
-        get_recon_losses: Callable[[Tensor], Tensor] = defaultdict(list)
-
-        def get_recon_loss(noise, times, modality):
-
-            def inner(pred_flow):
-                recon_modality = noise + pred_flow * (1. - times)
-                return F.mse_loss(modality, recon_modality)
-
-            return inner
-
-        # prepare storing of sizes of all modalities that require axial positions, for delayed application for efficiency
-
-        pos_emb_max_axial_dims: dict[int, list[Tensor]] = defaultdict(list)
-
-        # go through all modality samples and do necessary transform
-
-        for batch_index, batch_modalities in enumerate(modalities):
-
-            modality_index = 0
-            batch_modality_positions = []
-            batch_modality_tokens = []
-            batch_modality_pos_emb = []
-
-            batch_text = []
-
-            offset = 0
-
-            for modality in batch_modalities:
-                # if non-text modality detected and not given as a tuple
-                # cast to (int, Tensor) where int is defaulted to type 0 (convenience for one modality)
-
-                is_text = not isinstance(modality, tuple)
-                is_modality = not is_text
-
-                if is_text:
-                    modality_tensor = modality
-                else:
-                    modality_type, modality_tensor, *_ = modality
-
-                if is_modality:
-                    assert 0 <= modality_type < self.num_modalities, f'received a modality index that is out of range. only {self.num_modalities} modalities specified'
-
-                    mod = self.get_modality_info(modality_type)
-                    channel_dim = 0 if mod.channel_first_latent else -1
-
-                    assert mod.dim_latent == modality_tensor.shape[channel_dim], f'mismatch for modality latent dimension - expected {mod.dim_latent} but received {modality_tensor.shape[-1]} - modality shape is {tuple(modality_tensor.shape)}, perhaps you need to set `channel_first_latent` to the correct value'
-                    assert mod.num_dim == (len(modality_tensor.shape) - 1), f'mismatch for modality number of dimensions - expected {mod.num_dim} but received {len(modality_tensor.shape) - 1} {modality_tensor.shape}'
-
-                # auto ward against scalars (lone start end tokens)
-
-                if is_int_tensor(modality_tensor) and modality_tensor.ndim == 0:
-                    modality_tensor = rearrange(modality_tensor, '-> 1')
-
-                # handle text
-
-                if is_text:
-                    assert modality_tensor.ndim == 1 and is_int_tensor(modality_tensor)
-                    text_length = modality_tensor.shape[0]
-
-                    batch_text.append(modality_tensor)
-                    zeros = torch.zeros(text_length, self.dim, device = device)
-
-                    batch_modality_tokens.append(zeros)
-
-                    offset += text_length
-
-                    if need_axial_pos_emb:
-                        batch_modality_pos_emb.append(zeros)
-
-                    continue
-
-                # otherwise handle a modality
-
-                # get times for noising the modality
-
-                modality_time = times[batch_index, modality_index]
-
-                # noise
-
-                if return_loss:
-                    noise = torch.randn_like(modality_tensor)
-
-                    noised_modality = modality_tensor * modality_time + noise * (1. - modality_time)
-
-                    # the flow is the (data - noise)
-
-                    modality_flow = modality_tensor - noise
-
-                    # append to flow for loss
-
-                    flows[modality_type].append(modality_flow)
-
-                    modality_tensor = noised_modality
-
-                    # store function for deriving reconstruction loss from decoder
-
-                    get_recon_losses[modality_type].append(get_recon_loss(noise, modality_time, modality_tensor))
-
-                # go through maybe encoder
-
-                modality_tensor = add_temp_batch_dim(mod.latent_to_model)(modality_tensor)
-
-                # gather the modality length
-
-                modality_shape_tuple = modality_tensor.shape[:-1]
-                modality_length = math.prod(modality_shape_tuple)
-
-                text_tensor = torch.full((modality_length,), -1, device = device) # text is all -1 here, so text labels are not learned on
-
-                # only add modality meta information when not returning embedding, which only occurs when sampling modality
-
-                succeed_modality_tokens = precede_modality_tokens = 0
-
-                if not return_embed:
-                    # add the [som] and [eom] tokens for the modality type
-
-                    som_id, eom_id = mod.som_id, mod.eom_id
-
-                    # start by just storing the token length of the modality
-
-                    modality_shape_str = join([*map(str, modality_shape_tuple)], ',')
-                    modality_meta_info = self.char_tokenizer(modality_shape_str, device = device)
-
-                    precede_modality_tokens = len(modality_meta_info) + 2
-                    succeed_modality_tokens = 1
-
-                    text_tensor = cat((
-                        tensor_([self.meta_id]),
-                        modality_meta_info,
-                        tensor_([som_id]),
-                        text_tensor,
-                        tensor_([eom_id])
-                    ))
-
-                batch_modality_positions.append((modality_type, offset + precede_modality_tokens, modality_length)) # offset + preceding meta tag length (which includes the modality start token)
-
-                # store parsing out back to shape
-
-                modality_tensor, unpack_modality_shape = pack_with_inverse(modality_tensor, '* d')
-
-                inverse_fn = model_to_pred_flow(batch_index, offset + precede_modality_tokens, modality_length, unpack_modality_shape)
-
-                # maybe decorate the function if model output is predicting clean
-
-                if self.model_output_clean:
-                    decorator = get_model_output_to_flow_fn(modality_tensor, modality_time, self.eps, return_decorator = True)
-                    inverse_fn = decorator(inverse_fn)
-
-                # store function for extracting flow later
-
-                get_pred_flows[modality_type].append(inverse_fn)
-
-                # increment offset
-
-                offset += modality_length + precede_modality_tokens + succeed_modality_tokens # +2 due to [som] and [eom] - then account for meta start id and modality shape information (or eventually any meta information about modality)
-
-                modality_tensor = pad_at_dim(modality_tensor, (precede_modality_tokens, succeed_modality_tokens), dim = -2)
-
-                batch_modality_tokens.append(modality_tensor)
-
-                batch_text.append(text_tensor)
-
-                # handle axial positional embedding
-
-                if need_axial_pos_emb:
-
-                    if exists(mod.pos_emb_mlp):
-                        pos_emb_max_axial_dims[modality_type].append(tensor(modality_shape_tuple))
-                        pos_emb = (modality_type, modality_shape_tuple, (precede_modality_tokens, succeed_modality_tokens))
-
-                    else:
-                        pos_emb = torch.zeros(text_tensor.shape[0], self.dim, device = device)
-
-                    batch_modality_pos_emb.append(pos_emb)
-
-            text.append(cat(batch_text))
-
-            if need_axial_pos_emb:
-                modality_pos_emb.append(batch_modality_pos_emb)
-
-            modality_tokens.append(cat(batch_modality_tokens))
-            modality_positions.append(batch_modality_positions)
-
-            modality_index += 1
-
-        if return_loss:
-            total_tokens = sum([t.numel() for t in text])
-
-        text = pad_sequence(text, value = -1)
-
-        modality_tokens = pad_sequence(modality_tokens, dim = -2, value = 0.)
-
-        # handle modality positional embedding
+        # process the whole batch of interspersed text + modalities in batched ops
+        # (strategy chosen via `modality_processing`, see `PROCESSING_STRATEGIES`)
+
+        process_modality_batch_fn = get_processing_strategy(self.modality_processing)
+
+        (
+            text,
+            modality_tokens,
+            modality_positions,
+            modality_pos_emb,
+            flows,
+            get_pred_flows,
+            get_recon_losses,
+            pos_emb_max_axial_dims,
+            total_tokens
+        ) = process_modality_batch_fn(
+            modalities,
+            times,
+            self,
+            need_axial_pos_emb = need_axial_pos_emb,
+            return_loss = return_loss,
+            return_embed = return_embed
+        )
+
+        # handle modality positional embedding - lazy evaluation from factorized positional embedding of maximum axial dims
 
         if need_axial_pos_emb:
-            pos_emb_max_axial_dims = {mod_type: stack(sizes, dim = -1).amax(dim = -1) for mod_type, sizes in pos_emb_max_axial_dims.items()}
-            factorized_pos_emb = {mod_type: self.get_modality_info(mod_type).pos_emb_mlp(max_size, return_factorized = True) for mod_type, max_size in pos_emb_max_axial_dims.items()}
-
-            # lazy evaluate the modality positional embedding from the factorized positional embedding from maximum axial dims
-
-            evaluated_pos_emb = []
-
-            for batch_modality_pos_emb in modality_pos_emb:
-                evaluated_batch_pos_emb = []
-
-                for maybe_pos_emb_config in batch_modality_pos_emb:
-
-                    if is_tensor(maybe_pos_emb_config):
-                        evaluated_batch_pos_emb.append(maybe_pos_emb_config)
-                        continue
-
-                    mod_type, mod_size, padding = maybe_pos_emb_config
-
-                    mod_info = self.get_modality_info(mod_type)
-                    mod_factorized_pos_emb = factorized_pos_emb[mod_type]
-
-                    mod_pos_emb = mod_info.pos_emb_mlp.combine_factorized(mod_factorized_pos_emb, mod_size, flatten = True)
-                    mod_pos_emb = pad_at_dim(mod_pos_emb, padding, dim = -2) # handle padding for preceding and succeeding meta tokens
-
-                    evaluated_batch_pos_emb.append(mod_pos_emb)
-
-                evaluated_pos_emb.append(cat(evaluated_batch_pos_emb, dim = -2))
-
-            modality_pos_emb = pad_sequence(evaluated_pos_emb, dim = -2, value = 0.)
+            modality_pos_emb = evaluate_modality_pos_emb(modality_pos_emb, pos_emb_max_axial_dims, self, self.dim, device)
 
         # handle training mode and removal of last token
 
@@ -2935,6 +2724,13 @@ class Transfusion(Module):
             is_one_modality = reduce(is_one_modality, 'b m n -> b n', 'any')
             modality_loss_weight = is_one_modality.sum() / total_tokens
 
+            modality_loss_weights.append(modality_loss_weight)
+
+            # modality type not present in this batch - nothing to compute a flow loss on
+
+            if not pred_flow:
+                continue
+
             modality_flows = flows[modality_id]
 
             pack_pattern = 'd *' if mod.channel_first_latent else '* d'
@@ -2946,8 +2742,6 @@ class Transfusion(Module):
                 modality_pred_flow,
                 modality_flows
             )
-
-            modality_loss_weights.append(modality_loss_weight)
 
             flow_losses.append(flow_loss)
 
@@ -2979,6 +2773,9 @@ class Transfusion(Module):
             velocity_match_losses = []
 
             for ema_pred_flow, pred_flow in zip(ema_pred_flows, pred_flows):
+
+                if not pred_flow:
+                    continue
 
                 pack_pattern = 'd *' if mod.channel_first_latent else '* d'
                 pred_flow, _ = pack(pred_flow, pack_pattern)
