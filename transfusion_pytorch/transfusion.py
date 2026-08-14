@@ -1321,7 +1321,7 @@ class Transfusion(Module):
         *,
         num_text_tokens,
         transformer: dict | Transformer,
-        model_output_clean = True, # https://arxiv.org/abs/2511.13720
+        model_output_clean = False, # https://arxiv.org/abs/2511.13720
         dim_latent: int | tuple[int, ...] | None = None,
         channel_first_latent: bool | tuple[bool, ...] = False,
         add_pos_emb: bool | tuple[bool, ...] = False,
@@ -1791,7 +1791,7 @@ class Transfusion(Module):
         # take care of moving to device
 
         modality_sample = tree_map_tensor_to_device(modality_sample, device)
-        modality_sample = tree_map_tensor(lambda t: rearrange(t, '-> 1') if t.ndim == 0 else t, modality_sample)
+        modality_sample = tree_map_tensor(atleast_1d, modality_sample)
 
         modality_sample = concat_contiguous_text(modality_sample)
 
@@ -1923,7 +1923,7 @@ class Transfusion(Module):
                         cond_input = [[*modality_sample, (curr_modality_id, denoised)]]
 
                         step_times = rearrange(step_times, ' -> 1 1') # batch size of 1
-                        step_times = pad_left_at_dim(step_times, num_past_modalities, dim = 0, value = 1.) # past decoded modalities receive a time conditioning of 1.
+                        step_times = pad_left_at_dim(step_times, num_past_modalities, dim = -1, value = 1.) # past decoded modalities receive a time conditioning of 1.
 
                         (embeds_cond, get_pred_flows_cond), new_kv_cache = self.forward(
                             cond_input,
@@ -2106,7 +2106,7 @@ class Transfusion(Module):
             sample = [tensor([self.sos_id], device = device), *prompt]
 
             sample = tree_map_tensor_to_device(sample, device)
-            sample = tree_map_tensor(lambda t: rearrange(t, '-> 1') if t.ndim == 0 else t, sample)
+            sample = tree_map_tensor(atleast_1d, sample)
             sample = concat_contiguous_text(sample)
 
             # count the tokens in the sample - and the rotary position collapse of each modality
