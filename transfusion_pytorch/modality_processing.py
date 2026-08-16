@@ -20,6 +20,11 @@ strategies on the actual batch and dispatches to the fastest.
 to add a strategy: write `process_modality_batch_<name>(...)` with the same signature, register
 it in `PROCESSING_STRATEGIES`, and it will be picked up by `benchmark_processing.py` and the
 equivalence checks in the test suite automatically.
+
+all strategies compute the modality token lengths and the [meta] shape string *after* the
+`latent_to_model` projection, so downsampling (unet style) encoders are supported. the `flat`
+strategy relies on the projection being elementwise (linear) over the token axis - when it is
+not (e.g. a conv encoder), it falls back to per-instance processing.
 """
 
 import math
@@ -27,14 +32,17 @@ import time
 import statistics
 
 from collections import defaultdict
+from dataclasses import dataclass
 from functools import partial
 from typing import Callable, NamedTuple
 
 import torch
 import torch.nn.functional as F
 from torch import Tensor, tensor, is_tensor, cat, stack
+from torch import nn
 
 from einops import rearrange
+from einops.layers.torch import Rearrange
 
 from loguru import logger
 
@@ -119,7 +127,8 @@ def get_model_output_to_flow_fn(
 
     return decorator
 
-class ModalityRecord(NamedTuple):
+@dataclass(eq = False)
+class ModalityRecord:
     batch_index: int
     modality_type: int
     tensor: Tensor
@@ -199,44 +208,20 @@ def group_records_by_shape(records) -> dict[tuple[int, ...], list[ModalityRecord
 def scan_batch_for_structure(
     modalities: list[ModalitySample],
     times,
-    model,
-    *,
-    need_axial_pos_emb: bool,
-    return_embed: bool
+    model
 ):
-    # shared pass 1 - walk each sample for structure only, no gpu allocations in the hot path
-    # constant meta tensors ([meta], [som], [eom]) cached per modality type, shape meta strings tokenized once per unique string
+    # shared pass 1 - walk each sample for structure only, no gpu allocations in the hot path.
+    # offsets, meta tokens and positions cannot be computed here: they depend on the modality
+    # token lengths *after* the `latent_to_model` projection, which may downsample (unet style
+    # encoders) - so they are computed in `assemble_batch` once the projection is done
 
-    device = model.device
-
-    tensor_ = partial(tensor, device = device)
-
-    meta_tensors = {
-        modality_type: (
-            tensor_([model.meta_id]),
-            tensor_([model.get_modality_info(modality_type).som_id]),
-            tensor_([model.get_modality_info(modality_type).eom_id])
-        )
-        for modality_type in range(model.num_modalities)
-    }
-
-    meta_token_cache = {}
-
-    text_chunks = [] # per sample, list of (offset, int tensor) to be scattered into the text buffer
-    modality_positions = []
-    modality_pos_emb = []
-    pos_emb_max_axial_dims: dict[int, list[Tensor]] = defaultdict(list)
-
+    sample_items = []
     modality_records = []
-    total_lens = []
 
     for batch_index, batch_modalities in enumerate(modalities):
 
-        offset = 0
+        items = []
         modality_index = 0
-        sample_text_chunks = []
-        sample_modality_positions = []
-        sample_modality_pos_emb = []
 
         for modality in batch_modalities:
             is_text = not isinstance(modality, tuple)
@@ -256,14 +241,7 @@ def scan_batch_for_structure(
 
             if is_text:
                 assert modality_tensor.ndim == 1 and is_int_tensor(modality_tensor)
-                text_length = modality_tensor.shape[0]
-
-                sample_text_chunks.append((offset, modality_tensor))
-                offset += text_length
-
-                if need_axial_pos_emb:
-                    sample_modality_pos_emb.append(('zeros', text_length))
-
+                items.append(('text', modality_tensor))
                 continue
 
             # otherwise handle a modality
@@ -277,48 +255,119 @@ def scan_batch_for_structure(
             axial_shape = modality_tensor.shape[1:] if mod.channel_first_latent else modality_tensor.shape[:-1]
             modality_length = math.prod(axial_shape)
 
+            record = ModalityRecord(batch_index, modality_type, modality_tensor, modality_time, -1, modality_length, axial_shape)
+
+            modality_records.append(record)
+            items.append(('modality', record))
+
+        sample_items.append(items)
+
+    return modality_records, sample_items
+
+def get_cached_meta_tokens(model, device, shape_str, modality_type):
+    # the constant [meta] [shape] [som] [eom] token tensors for a modality type + shape
+    # string, cached per model + device (built once, not on every call)
+
+    cache = getattr(model, '_modality_meta_cache', None)
+
+    if not exists(cache):
+        cache = model._modality_meta_cache = {}
+
+    key = (str(device), shape_str, modality_type)
+
+    if key not in cache:
+        tensor_ = partial(tensor, device = device)
+        mod = model.get_modality_info(modality_type)
+
+        meta_tensor = tensor_([model.meta_id])
+        shape_tokens = model.char_tokenizer(shape_str, device = device)
+        som_tensor = tensor_([mod.som_id])
+        eom_tensor = tensor_([mod.eom_id])
+
+        cache[key] = (meta_tensor, shape_tokens, som_tensor, eom_tensor)
+
+    return cache[key]
+
+def assemble_batch(
+    sample_items,
+    model,
+    device,
+    *,
+    need_axial_pos_emb,
+    return_embed
+):
+    # pass 2 - walk each sample again to compute the token offsets, meta tokens, positions
+    # and axial positional embedding bookkeeping. the modality lengths and shapes used here
+    # are the *projected* ones (updated on the records by the processing step), which for
+    # downsampling (unet style) encoders differ from the raw input shapes
+
+    text_chunks = [] # per sample, list of (offset, int tensor) to be scattered into the text buffer
+    modality_positions = []
+    modality_pos_emb = []
+    pos_emb_max_axial_dims: dict[int, list[Tensor]] = defaultdict(list)
+
+    total_lens = []
+
+    for batch_index, items in enumerate(sample_items):
+
+        offset = 0
+        sample_text_chunks = []
+        sample_modality_positions = []
+        sample_modality_pos_emb = []
+
+        for item in items:
+
+            if item[0] == 'text':
+                chunk = item[1]
+
+                sample_text_chunks.append((offset, chunk))
+                offset += chunk.shape[0]
+
+                if need_axial_pos_emb:
+                    sample_modality_pos_emb.append(('zeros', chunk.shape[0]))
+
+                continue
+
+            # otherwise a modality instance
+
+            record = item[1]
+            mod = model.get_modality_info(record.modality_type)
+
             precede_modality_tokens = succeed_modality_tokens = 0
 
             if not return_embed:
                 # add the [meta] [shape] [som] ... [eom] tokens
 
-                modality_shape_str = join([*map(str, axial_shape)], ',')
-                modality_meta_info = meta_token_cache.get(modality_shape_str)
+                modality_shape_str = join([*map(str, record.axial_shape)], ',')
+                meta_tensor, shape_tokens, som_tensor, eom_tensor = get_cached_meta_tokens(model, device, modality_shape_str, record.modality_type)
 
-                if not exists(modality_meta_info):
-                    modality_meta_info = model.char_tokenizer(modality_shape_str, device = device)
-                    meta_token_cache[modality_shape_str] = modality_meta_info
-
-                precede_modality_tokens = len(modality_meta_info) + 2
+                precede_modality_tokens = len(shape_tokens) + 2
                 succeed_modality_tokens = 1
-
-                meta_tensor, som_tensor, eom_tensor = meta_tensors[modality_type]
 
                 sample_text_chunks.extend((
                     (offset, meta_tensor),
-                    (offset + 1, modality_meta_info),
+                    (offset + 1, shape_tokens),
                     (offset + precede_modality_tokens - 1, som_tensor),
-                    (offset + precede_modality_tokens + modality_length, eom_tensor)
+                    (offset + precede_modality_tokens + record.length, eom_tensor)
                 ))
 
             scatter_offset = offset + precede_modality_tokens
+            record.scatter_offset = scatter_offset
 
-            sample_modality_positions.append((modality_type, scatter_offset, modality_length))
+            sample_modality_positions.append((record.modality_type, scatter_offset, record.length))
 
             # handle axial positional embedding
 
             if need_axial_pos_emb:
 
                 if exists(mod.pos_emb_mlp):
-                    pos_emb_max_axial_dims[modality_type].append(tensor(axial_shape))
-                    sample_modality_pos_emb.append((modality_type, axial_shape, (precede_modality_tokens, succeed_modality_tokens)))
+                    pos_emb_max_axial_dims[record.modality_type].append(tensor(record.axial_shape))
+                    sample_modality_pos_emb.append((record.modality_type, record.axial_shape, (precede_modality_tokens, succeed_modality_tokens)))
 
                 else:
-                    sample_modality_pos_emb.append(('zeros', precede_modality_tokens + modality_length + succeed_modality_tokens))
+                    sample_modality_pos_emb.append(('zeros', precede_modality_tokens + record.length + succeed_modality_tokens))
 
-            offset += modality_length + precede_modality_tokens + succeed_modality_tokens
-
-            modality_records.append(ModalityRecord(batch_index, modality_type, modality_tensor, modality_time, scatter_offset, modality_length, axial_shape))
+            offset += record.length + precede_modality_tokens + succeed_modality_tokens
 
         total_lens.append(offset)
         text_chunks.append(sample_text_chunks)
@@ -327,7 +376,7 @@ def scan_batch_for_structure(
         if need_axial_pos_emb:
             modality_pos_emb.append(sample_modality_pos_emb)
 
-    return modality_records, text_chunks, modality_positions, modality_pos_emb, pos_emb_max_axial_dims, total_lens
+    return text_chunks, modality_positions, modality_pos_emb, pos_emb_max_axial_dims, total_lens
 
 def process_modality_batch_naive(
     modalities: list[ModalitySample],
@@ -553,6 +602,20 @@ class ProcessedRecord(NamedTuple):
     slice_: Callable | None # token-axis slicing function of the flat per-type tensors
     time: Tensor
 
+def latent_projection_is_linear(module) -> bool:
+    # whether a `latent_to_model` projection is elementwise (linear) over the token axis.
+    # only such projections commute with concatenating instances along the token axis, which
+    # the flat strategy relies on - conv / unet style encoders mix tokens across the
+    # concatenation boundary, so flat must not be used for them
+
+    if isinstance(module, (nn.Identity, nn.Linear, Rearrange)):
+        return True
+
+    if isinstance(module, nn.Sequential):
+        return all(latent_projection_is_linear(m) for m in module)
+
+    return False
+
 def process_type_flat(records: list[ModalityRecord], model, dim, return_loss) -> dict[ModalityRecord, ProcessedRecord]:
     # process all instances of one modality type (of any shapes) as a single flat tensor:
     # one random noise, one noising, one latent projection for the whole type. the projected
@@ -564,6 +627,12 @@ def process_type_flat(records: list[ModalityRecord], model, dim, return_loss) ->
 
     mod = model.get_modality_info(records[0].modality_type)
     channel_first = mod.channel_first_latent
+
+    if not latent_projection_is_linear(mod.latent_to_model):
+        # the projection mixes tokens across the concatenation boundary (conv / unet style
+        # encoder), so the flat path is not applicable - process each instance directly
+
+        return {record: process_instance(record, model, dim, return_loss) for record in records}
 
     # flatten each instance to its token sequence first - (length, d) for channel last,
     # (c, length) for channel first - then concatenate along the token axis
@@ -644,7 +713,15 @@ def process_group_stacked(shape_records: list[ModalityRecord], model, dim, retur
     processed_by_record = {}
 
     for ind, record in enumerate(shape_records):
-        packed = projected[ind].reshape(record.length, dim)
+        projected_instance = projected[ind]
+
+        # the projection may downsample (unet style encoders) - the token length and axial
+        # shape used for positions and the meta shape string are the *projected* ones
+
+        record.length = math.prod(projected_instance.shape[:-1])
+        record.axial_shape = tuple(projected_instance.shape[:-1])
+
+        packed = projected_instance.reshape(record.length, dim)
 
         if return_loss:
             processed_by_record[record] = ProcessedRecord(packed, noise[ind], noised[ind], flow[ind], None, None, None, None, record.time)
@@ -653,7 +730,7 @@ def process_group_stacked(shape_records: list[ModalityRecord], model, dim, retur
 
     return processed_by_record
 
-def process_instance(record: ModalityRecord, model, dim, return_loss) -> dict[ModalityRecord, ProcessedRecord]:
+def process_instance(record: ModalityRecord, model, dim, return_loss) -> ProcessedRecord:
     # process a single instance directly - a stack or cat would be a wasted copy
 
     mod = model.get_modality_info(record.modality_type)
@@ -673,12 +750,18 @@ def process_instance(record: ModalityRecord, model, dim, return_loss) -> dict[Mo
     else:
         projected = mod.latent_to_model(noised)
 
+    # the projection may downsample (unet style encoders) - the token length and axial
+    # shape used for positions and the meta shape string are the *projected* ones
+
+    record.length = math.prod(projected.shape[:-1])
+    record.axial_shape = tuple(projected.shape[:-1])
+
     packed = projected.reshape(record.length, dim)
 
     if return_loss:
-        return {record: ProcessedRecord(packed, noise, noised, flow, None, None, None, None, record.time)}
+        return ProcessedRecord(packed, noise, noised, flow, None, None, None, None, record.time)
 
-    return {record: ProcessedRecord(packed, None, None, None, None, None, None, None, record.time)}
+    return ProcessedRecord(packed, None, None, None, None, None, None, None, record.time)
 
 def build_record_closures(
     records: list[ModalityRecord],
@@ -689,8 +772,7 @@ def build_record_closures(
     return_loss,
     flows,
     get_pred_flows,
-    get_recon_losses,
-    packed_by_record
+    get_recon_losses
 ):
     # build the flow extraction functions and loss closures in scan order, so per type lists stay aligned
 
@@ -724,9 +806,51 @@ def build_record_closures(
             else:
                 get_recon_losses[modality_type].append(get_recon_loss(processed.noise, processed.time, processed.noised))
 
-        packed_by_record[record] = processed.packed
+def process_type_grouped(records: list[ModalityRecord], model, dim, return_loss) -> dict[ModalityRecord, ProcessedRecord]:
+    # process each (type, shape) group of 2+ instances with one batched noise, noising and
+    # projection, and each singleton group per-instance
 
-def process_modality_batch(
+    processed_by_record = {}
+
+    for shape_records in group_records_by_shape(records).values():
+
+        if len(shape_records) > 1:
+            # group of 2+ same-shaped instances - process all at once:
+            # one noise, one noising, one projection for the whole group,
+            # then scatter each result back into its position in the sequence
+
+            processed_by_record.update(process_group_stacked(shape_records, model, dim, return_loss))
+
+        else:
+            # group of one - a stack would be a wasted copy, process the instance directly
+
+            processed_by_record[shape_records[0]] = process_instance(shape_records[0], model, dim, return_loss)
+
+    return processed_by_record
+
+def process_type_hybrid(records: list[ModalityRecord], model, dim, return_loss) -> dict[ModalityRecord, ProcessedRecord]:
+    # best of both: same (type, shape) groups of 2+ are processed with one batched noise /
+    # noising / projection (no concatenation copies), while all singleton groups of a type are
+    # collected and processed together with the flat path (one noise / noising / projection
+    # for the whole set) instead of per-instance.
+
+    processed_by_record = {}
+
+    shape_groups = group_records_by_shape(records)
+
+    for shape_records in shape_groups.values():
+        if len(shape_records) > 1:
+            processed_by_record.update(process_group_stacked(shape_records, model, dim, return_loss))
+
+    singleton_records = [shape_records[0] for shape_records in shape_groups.values() if len(shape_records) == 1]
+
+    if singleton_records:
+        processed_by_record.update(process_type_flat(singleton_records, model, dim, return_loss))
+
+    return processed_by_record
+
+def _process_modality_batch_with(
+    process_type_fn: Callable,
     modalities: list[ModalitySample],
     times: Float['b m'],
     model,
@@ -741,58 +865,46 @@ def process_modality_batch(
 
     batch = len(modalities)
 
-    modality_records, text_chunks, modality_positions, modality_pos_emb, pos_emb_max_axial_dims, total_lens = scan_batch_for_structure(
+    modality_records, sample_items = scan_batch_for_structure(
         modalities,
         times,
-        model,
-        need_axial_pos_emb = need_axial_pos_emb,
-        return_embed = return_embed
+        model
     )
 
-    # pass 2 - group all modality instances by (modality type, shape) and process in parallel:
+    # pass 2 - group all modality instances by modality type and process in parallel:
     # one random noise, one noising operation, one latent to model projection per group
+    # (or per type for the flat path)
 
     records_by_type = defaultdict(list)
 
     for record in modality_records:
         records_by_type[record.modality_type].append(record)
 
-    grouped_instances = sum(len(shape_records) - 1 for records in records_by_type.values() for shape_records in group_records_by_shape(records).values() if len(shape_records) > 1)
-    singleton_groups = sum(1 for records in records_by_type.values() for shape_records in group_records_by_shape(records).values() if len(shape_records) == 1)
-
-    logger.debug(f'process_modality_batch: {len(records_by_type)} modality types, {len(modality_records)} modality instances detected, '
-                 f'{grouped_instances} instances processed in batched groups, {singleton_groups} processed per-instance')
-
     flows = defaultdict(list)
     get_pred_flows: GetPredFlows = defaultdict(list)
     get_recon_losses = defaultdict(list)
 
     processed_by_record = {}
-    packed_by_record = {}
 
     for modality_type, records in records_by_type.items():
+        processed_by_record.update(process_type_fn(records, model, dim, return_loss))
 
-        shape_groups = group_records_by_shape(records)
+    # pass 3 - compute the token offsets, meta tokens and positions from the *projected*
+    # modality lengths, then build the flow extraction functions and loss closures in scan
+    # order, so per type lists stay aligned
 
-        for shape_records in shape_groups.values():
+    text_chunks, modality_positions, modality_pos_emb, pos_emb_max_axial_dims, total_lens = assemble_batch(
+        sample_items,
+        model,
+        device,
+        need_axial_pos_emb = need_axial_pos_emb,
+        return_embed = return_embed
+    )
 
-            if len(shape_records) > 1:
-                # group of 2+ same-shaped instances - process all at once:
-                # one noise, one noising, one projection for the whole group,
-                # then scatter each result back into its position in the sequence
+    for modality_type, records in records_by_type.items():
+        build_record_closures(records, processed_by_record, model, dim, modality_type, return_loss, flows, get_pred_flows, get_recon_losses)
 
-                processed_by_record.update(process_group_stacked(shape_records, model, dim, return_loss))
-
-            else:
-                # group of one - a stack would be a wasted copy, process the instance directly
-
-                processed_by_record.update(process_instance(shape_records[0], model, dim, return_loss))
-
-        # build the flow extraction functions and loss closures in scan order, so per type lists stay aligned
-
-        build_record_closures(records, processed_by_record, model, dim, modality_type, return_loss, flows, get_pred_flows, get_recon_losses, packed_by_record)
-
-    # pass 3 - assemble each sample into a single pre-allocated buffer with per-chunk scatter,
+    # pass 4 - assemble each sample into a single pre-allocated buffer with per-chunk scatter,
     # replacing per-chunk allocations, padding and cats
 
     max_len = max(total_lens)
@@ -805,7 +917,7 @@ def process_modality_batch(
             text_bufs[batch_index, offset:(offset + chunk.shape[0])] = chunk
 
     for record in modality_records:
-        packed = packed_by_record[record]
+        packed = processed_by_record[record].packed
         modality_bufs[record.batch_index, record.scatter_offset:(record.scatter_offset + record.length)] = packed
 
     total_tokens = sum(total_lens) if return_loss else None
@@ -823,6 +935,25 @@ def process_modality_batch(
         get_recon_losses = get_recon_losses,
         pos_emb_max_axial_dims = pos_emb_max_axial_dims,
         total_tokens = total_tokens
+    )
+
+def process_modality_batch(
+    modalities: list[ModalitySample],
+    times: Float['b m'],
+    model,
+    *,
+    need_axial_pos_emb: bool,
+    return_loss: bool,
+    return_embed: bool
+) -> ProcessedModalityBatch:
+    return _process_modality_batch_with(
+        process_type_grouped,
+        modalities,
+        times,
+        model,
+        need_axial_pos_emb = need_axial_pos_emb,
+        return_loss = return_loss,
+        return_embed = return_embed
     )
 
 def process_modality_batch_flat(
@@ -839,69 +970,17 @@ def process_modality_batch_flat(
     # token axis, then process the whole type with a single random noise, single noising and
     # single latent projection. the noise, noising and projection are all elementwise / linear
     # over the last dim, so nothing about the grouping by shape helps - this drops the kernel
-    # count per type from one-per-group to a small constant.
+    # count per type from one-per-group to a small constant. for non-linear projections (conv /
+    # unet style encoders) `process_type_flat` falls back to per-instance processing.
 
-    device = model.device
-    dim = model.dim
-
-    batch = len(modalities)
-
-    modality_records, text_chunks, modality_positions, modality_pos_emb, pos_emb_max_axial_dims, total_lens = scan_batch_for_structure(
+    return _process_modality_batch_with(
+        process_type_flat,
         modalities,
         times,
         model,
         need_axial_pos_emb = need_axial_pos_emb,
+        return_loss = return_loss,
         return_embed = return_embed
-    )
-
-    records_by_type = defaultdict(list)
-
-    for record in modality_records:
-        records_by_type[record.modality_type].append(record)
-
-    flows = defaultdict(list)
-    get_pred_flows: GetPredFlows = defaultdict(list)
-    get_recon_losses = defaultdict(list)
-
-    processed_by_record = {}
-    packed_by_record = {}
-
-    for modality_type, records in records_by_type.items():
-
-        processed_by_record.update(process_type_flat(records, model, dim, return_loss))
-
-        build_record_closures(records, processed_by_record, model, dim, modality_type, return_loss, flows, get_pred_flows, get_recon_losses, packed_by_record)
-
-    # pass 3 - assemble each sample into a single pre-allocated buffer with per-chunk scatter
-
-    max_len = max(total_lens)
-
-    text_bufs = torch.full((batch, max_len), -1, device = device)
-    modality_bufs = torch.zeros((batch, max_len, dim), device = device)
-
-    for batch_index, sample_chunks in enumerate(text_chunks):
-        for offset, chunk in sample_chunks:
-            text_bufs[batch_index, offset:(offset + chunk.shape[0])] = chunk
-
-    for record in modality_records:
-        packed = packed_by_record[record]
-        modality_bufs[record.batch_index, record.scatter_offset:(record.scatter_offset + record.length)] = packed
-
-    total_tokens = sum(total_lens) if return_loss else None
-
-    if not need_axial_pos_emb:
-        modality_pos_emb = None
-
-    return ProcessedModalityBatch(
-        text = text_bufs,
-        modality_tokens = modality_bufs,
-        modality_positions = modality_positions,
-        modality_pos_emb = modality_pos_emb,
-        flows = flows,
-        get_pred_flows = get_pred_flows,
-        get_recon_losses = get_recon_losses,
-        pos_emb_max_axial_dims = pos_emb_max_axial_dims,
-        total_tokens = total_tokens
     )
 
 def process_modality_batch_hybrid(
@@ -913,82 +992,14 @@ def process_modality_batch_hybrid(
     return_loss: bool,
     return_embed: bool
 ) -> ProcessedModalityBatch:
-
-    # best of both: same (type, shape) groups of 2+ are processed with one batched noise /
-    # noising / projection (no concatenation copies), while all singleton groups of a type are
-    # collected and processed together with the flat path (one noise / noising / projection
-    # for the whole set) instead of per-instance.
-
-    device = model.device
-    dim = model.dim
-
-    batch = len(modalities)
-
-    modality_records, text_chunks, modality_positions, modality_pos_emb, pos_emb_max_axial_dims, total_lens = scan_batch_for_structure(
+    return _process_modality_batch_with(
+        process_type_hybrid,
         modalities,
         times,
         model,
         need_axial_pos_emb = need_axial_pos_emb,
+        return_loss = return_loss,
         return_embed = return_embed
-    )
-
-    records_by_type = defaultdict(list)
-
-    for record in modality_records:
-        records_by_type[record.modality_type].append(record)
-
-    flows = defaultdict(list)
-    get_pred_flows: GetPredFlows = defaultdict(list)
-    get_recon_losses = defaultdict(list)
-
-    processed_by_record = {}
-    packed_by_record = {}
-
-    for modality_type, records in records_by_type.items():
-
-        shape_groups = group_records_by_shape(records)
-
-        for shape_records in shape_groups.values():
-            if len(shape_records) > 1:
-                processed_by_record.update(process_group_stacked(shape_records, model, dim, return_loss))
-
-        singleton_records = [shape_records[0] for shape_records in shape_groups.values() if len(shape_records) == 1]
-
-        if singleton_records:
-            processed_by_record.update(process_type_flat(singleton_records, model, dim, return_loss))
-
-        build_record_closures(records, processed_by_record, model, dim, modality_type, return_loss, flows, get_pred_flows, get_recon_losses, packed_by_record)
-
-    # pass 3 - assemble each sample into a single pre-allocated buffer with per-chunk scatter
-
-    max_len = max(total_lens)
-
-    text_bufs = torch.full((batch, max_len), -1, device = device)
-    modality_bufs = torch.zeros((batch, max_len, dim), device = device)
-
-    for batch_index, sample_chunks in enumerate(text_chunks):
-        for offset, chunk in sample_chunks:
-            text_bufs[batch_index, offset:(offset + chunk.shape[0])] = chunk
-
-    for record in modality_records:
-        packed = packed_by_record[record]
-        modality_bufs[record.batch_index, record.scatter_offset:(record.scatter_offset + record.length)] = packed
-
-    total_tokens = sum(total_lens) if return_loss else None
-
-    if not need_axial_pos_emb:
-        modality_pos_emb = None
-
-    return ProcessedModalityBatch(
-        text = text_bufs,
-        modality_tokens = modality_bufs,
-        modality_positions = modality_positions,
-        modality_pos_emb = modality_pos_emb,
-        flows = flows,
-        get_pred_flows = get_pred_flows,
-        get_recon_losses = get_recon_losses,
-        pos_emb_max_axial_dims = pos_emb_max_axial_dims,
-        total_tokens = total_tokens
     )
 
 def evaluate_modality_pos_emb(

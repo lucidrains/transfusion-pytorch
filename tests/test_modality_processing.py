@@ -436,3 +436,94 @@ def test_auto_across_strategy_explicit_models_train_identically():
         losses[strategy] = loss.item()
 
     assert len(set(losses.values())) == 1, losses
+
+# unet style (downsampling) encoders - token lengths must be derived from the *projected*
+# tokens, not the raw input shapes, matching the reference `naive` strategy
+
+def build_unet_model(**overrides):
+    kwargs = dict(
+        num_text_tokens = 10,
+        dim_latent = 4,
+        modality_default_shape = (14, 14),
+        pre_post_transformer_enc_dec = (
+            nn.Conv2d(4, 16, 3, 2, 1),
+            nn.ConvTranspose2d(16, 4, 3, 2, 1, output_padding = 1),
+        ),
+        channel_first_latent = True,
+        transformer = dict(dim = 16, depth = 1, use_flex_attn = False)
+    )
+    kwargs.update(overrides)
+    return Transfusion(**kwargs).eval()
+
+def make_unet_batch():
+    return [
+        [randint(0, 10, (8,)), (0, randn(4, 14, 14)), randint(0, 10, (4,)), (0, randn(4, 12, 12)), randint(0, 10, (4,))],
+        [randint(0, 10, (6,)), (0, randn(4, 14, 14)), randint(0, 10, (5,)), (0, randn(4, 16, 16))]
+    ]
+
+def test_unet_encoder_equivalence_all_strategies():
+    # the stride-2 conv encoder downsamples 14x14 -> 7x7 - every strategy must derive the
+    # token lengths from the projected tokens, matching `naive`
+
+    model = build_unet_model()
+    batch = make_unet_batch()
+    times = torch.ones(2, 2)
+
+    assert_strategies_equivalent(model, batch, times, need_axial_pos_emb = False, return_loss = True, return_embed = False)
+    assert_strategies_equivalent(model, batch, times, need_axial_pos_emb = False, return_loss = False, return_embed = True)
+
+def test_unet_encoder_equivalence_with_pos_emb():
+    model = build_unet_model(add_pos_emb = True, modality_num_dim = 2)
+    batch = make_unet_batch()
+    times = torch.ones(2, 2)
+
+    assert_strategies_equivalent(model, batch, times, need_axial_pos_emb = True, return_loss = True, return_embed = False)
+
+def test_unet_encoder_positions_use_projected_lengths():
+    # 14x14 with stride 2 conv -> 7x7 projected tokens, so the recorded length is 49 not 196
+
+    model = build_unet_model()
+    batch = make_unet_batch()
+    times = torch.ones(2, 2)
+
+    out = get_processing_strategy('grouped')(batch, times, model, need_axial_pos_emb = False, return_loss = True, return_embed = False)
+
+    assert out.modality_positions[0] == [(0, 13, 49), (0, 72, 36)]
+    assert out.modality_positions[1] == [(0, 11, 49), (0, 71, 64)]
+    assert out.total_tokens == 249
+
+def test_unet_encoder_flat_falls_back_for_nonlinear_projection():
+    from transfusion_pytorch.modality_processing import latent_projection_is_linear
+
+    model = build_unet_model()
+
+    assert not latent_projection_is_linear(model.get_modality_info(0).latent_to_model)
+
+    batch = make_unet_batch()
+    times = torch.ones(2, 2)
+
+    from unittest import mock
+
+    with mock.patch('torch.randn_like', side_effect = lambda t: torch.zeros_like(t)):
+        out_flat = get_processing_strategy('flat')(batch, times, model, need_axial_pos_emb = False, return_loss = True, return_embed = False)
+        out_naive = get_processing_strategy('naive')(batch, times, model, need_axial_pos_emb = False, return_loss = True, return_embed = False)
+
+    assert torch.equal(out_flat.modality_tokens, out_naive.modality_tokens)
+    assert out_flat.modality_positions == out_naive.modality_positions
+
+def test_unet_encoder_end_to_end_auto_training():
+    torch.manual_seed(0)
+
+    model = build_unet_model(modality_processing = 'auto').train()
+
+    optimizer = torch.optim.Adam(model.parameters(), lr = 1e-3)
+    batch = make_unet_batch()
+
+    for _ in range(3):
+        loss = model(batch)
+
+        assert torch.isfinite(loss)
+
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()

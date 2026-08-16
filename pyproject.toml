@@ -1,6 +1,6 @@
 [project]
 name = "transfusion-pytorch"
-version = "0.19.2"
+version = "0.19.3"
 description = "Transfusion in Pytorch"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }
@@ -15,13 +15,13 @@ keywords = [
     'attention mechanism',
     'rectified flow',
   ]
-classifiers=[
+classifiers = [
     'Development Status :: 4 - Beta',
     'Intended Audience :: Developers',
     'Topic :: Scientific/Engineering :: Artificial Intelligence',
     'License :: OSI Approved :: MIT License',
     'Programming Language :: Python :: 3.8',
-  ]
+]
 
 dependencies = [
     'axial-positional-embedding>=0.3.5',
