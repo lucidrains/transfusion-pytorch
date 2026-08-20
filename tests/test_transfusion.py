@@ -902,3 +902,135 @@ def test_sample_many_stochastic_text_distribution():
     outs_2 = model.sample_many([[prime]], init_modality_noise = noise, max_length = 20, text_temperature = 1.0, cfg_scale = 1., modality_steps = 4)
 
     assert not torch.equal(outs_1[0][-1], outs_2[0][-1])
+
+# force modality at start
+# `force_modality_at_start` makes sampling skip text decoding and start off by decoding the given
+# modality type, optionally with a forced shape - e.g. prompt with a video and force a 1d action
+# of chunk length 32
+
+def make_video_action_model():
+    return Transfusion(
+        num_text_tokens = 16,
+        dim_latent = (16, 8),
+        modality_default_shape = ((4, 4, 4), (16,)), # (video, action)
+        channel_first_latent = (True, False),
+        transformer = dict(
+            dim = 16,
+            depth = 2,
+            dim_head = 8,
+            heads = 2
+        )
+    ).eval()
+
+def test_sample_force_modality_at_start():
+    model = make_video_action_model()
+
+    text = randint(0, 16, (3,))
+    video = randn(16, 4, 4, 4) # channel first video latent - (latent dim, frames, height, width)
+
+    sample = model.sample_one(
+        [text, (0, video)], # text, then video
+        force_modality_at_start = (1, (32,)), # force a 1d action of chunk length 32
+        max_length = 64,
+        text_temperature = 0.,
+        cfg_scale = 1.,
+        modality_steps = 4
+    )
+
+    assert isinstance(sample[1], tuple)
+    assert sample[1][0] == 0
+    assert torch.allclose(sample[1][1], video)
+
+    assert isinstance(sample[3], tuple)
+    assert sample[3][0] == 1
+    assert sample[3][1].shape == (32, 8) # forced action of chunk length 32
+
+    (sample_many_out,) = model.sample_many(
+        [[text, (0, video)]],
+        force_modality_at_start = (1, (32,)),
+        max_length = 64,
+        text_temperature = 0.,
+        cfg_scale = 1.,
+        modality_steps = 4
+    )
+
+    assert isinstance(sample_many_out[3], tuple)
+    assert sample_many_out[3][0] == 1
+    assert sample_many_out[3][1].shape == (32, 8)
+
+def test_sample_force_modality_at_start_without_shape():
+    # forcing only the modality type falls back to the modality's default shape
+
+    model = make_sampling_model(num_modalities = 2)
+
+    noise = torch.randn(16, 16)
+    prime = tensor([model.som_ids[0]])
+
+    outs = model.sample_many(
+        [[prime]],
+        force_modality_at_start = 1,
+        init_modality_noise = noise,
+        max_length = 32,
+        text_temperature = 0.,
+        cfg_scale = 1.,
+        modality_steps = 4
+    )
+
+    assert len(outs) == 1
+
+    sample = outs[0]
+
+    assert isinstance(sample[1], tuple)
+    assert sample[1][0] == 1
+    assert sample[1][1].shape == (3, 3, 16) # default shape (3, 3) with latent dim 16
+
+def test_sample_force_modality_at_start_heterogeneous_prompts():
+    # a batch of prompts with different text and video lengths, all forced to decode the same
+    # action shape
+
+    model = make_video_action_model()
+
+    text_1 = randint(0, 16, (2,))
+    text_2 = randint(0, 16, (5,))
+
+    video_1 = randn(16, 4, 4, 4) # 4 frames
+    video_2 = randn(16, 2, 4, 4) # 2 frames
+    video_3 = randn(16, 6, 4, 4) # 6 frames
+
+    outs = model.sample_many(
+        [
+            [text_1, (0, video_1)],
+            [text_2, (0, video_2)],
+            [(0, video_3)],
+        ],
+        force_modality_at_start = (1, (32,)),
+        max_length = 128,
+        text_temperature = 0.,
+        cfg_scale = 1.,
+        modality_steps = 4
+    )
+
+    assert len(outs) == 3
+
+    for sample in outs:
+        assert isinstance(sample[-2], tuple)
+        assert sample[-2][0] == 1
+        assert sample[-2][1].shape == (32, 8) # same forced action shape
+
+def test_sample_force_modality_at_start_equivalent_sample_one_many():
+    # `sample_many` with a forced modality must produce the same samples as `sample_one` run per prompt
+
+    model = make_video_action_model()
+
+    text = randint(0, 16, (3,))
+    video = randn(16, 4, 4, 4)
+    noise = torch.randn(32, 8)
+
+    assert_sample_equivalence(
+        model,
+        [[text, (0, video)], [text, (0, video)]],
+        force_modality_at_start = (1, (32,)),
+        init_modality_noise = noise,
+        max_length = 64,
+        cfg_scale = 1.
+    )

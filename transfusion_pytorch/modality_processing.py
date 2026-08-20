@@ -44,8 +44,6 @@ from torch import nn
 from einops import rearrange
 from einops.layers.torch import Rearrange
 
-from loguru import logger
-
 from torch_einops_utils import (
     pack_with_inverse,
     pad_at_dim,

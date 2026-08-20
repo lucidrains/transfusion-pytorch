@@ -212,6 +212,46 @@ If you run into some weird error with `safetensors`, run this too
 $ pip install -U diffusers transformers accelerate scipy ftfy safetensors
 ```
 
+### Forcing a modality at the start of generation
+
+To force the first generated thing to be a specific modality - skipping text decoding at the start -
+pass `force_modality_at_start` to `sample` / `sample_many` with the modality type, or a
+`(modality_type, shape)` tuple to also force its shape. for example, prompt with some text, then a
+video (modality 0, channel first 3d latent), and force a 1d action of chunk length 32 (modality 1):
+
+```python
+import torch
+from transfusion_pytorch import Transfusion
+
+model = Transfusion(
+    num_text_tokens = 256,
+    dim_latent = (16, 8),
+    modality_default_shape = ((4, 4, 4), (16,)),  # (video, action)
+    channel_first_latent = (True, False),
+    transformer = dict(
+        dim = 512,
+        depth = 8
+    )
+)
+
+text = torch.randint(0, 256, (16,))    # some text prompt
+video = torch.randn(16, 4, 4, 4)       # channel first video latent - (latent dim, frames, height, width)
+
+samples = model.sample_many(
+    [[text, (0, video)]],              # one prompt: text, then video
+    force_modality_at_start = (1, (32,)),  # force a 1d action of chunk length 32
+    cfg_scale = 3.,
+)
+
+action = samples[0][3][1]  # the forced action, of shape (32, 8)
+```
+
+the batch can mix prompts of different text and video lengths - each sample still gets its forced
+action in the same shape.
+
+forcing only the modality type (`force_modality_at_start = 1`) falls back to the modality's default
+shape (or `fixed_modality_shape`).
+
 ## Citations
 
 ```bibtex

@@ -62,6 +62,7 @@ from .modality_processing import (
     GetPredFlows,
     get_model_output_to_flow_fn,
     evaluate_modality_pos_emb,
+    get_cached_meta_tokens,
     DEFAULT_PROCESSING_STRATEGY,
     get_processing_strategy
 )
@@ -98,8 +99,6 @@ except ImportError:
 # types
 
 Scalar = Float['']
-
-ModalityTokenTransform = str | Callable | None
 
 RawModalityPositions = list[list[tuple[int, int, int]]]
 
@@ -141,9 +140,6 @@ def always(val):
     def inner(*args, **kwargs):
         return val
     return inner
-
-def first(it):
-    return it[0]
 
 def join(arr, delimiter = ''):
     return delimiter.join(arr)
@@ -420,48 +416,6 @@ def derive_rotary_positions_from_modality_positions(
 
 # modality tokens are given as list of tensors, can be then be embedded into the modality tokens for attending alongside text tokens
 
-@typecheck
-def embed_modality_tokens(
-    seq_len: int,
-    dim: int,
-    modality_tokens: list[list[Float['...']]],
-    modalities: Int['b m 3'],
-    modality_id: int,
-    channel_first: bool
-) -> Float['b n d']:
-
-    batch, device = modalities.shape[0], modalities.device
-
-    shape = (batch, seq_len, dim) if not channel_first else (batch, dim, seq_len)
-    output = torch.zeros(shape, device = device)
-
-    for batch_ind, (one_modality, one_modality_token) in enumerate(zip(modalities, modality_tokens)):
-        for (modality_type, offset, length), batch_modality_token in zip(one_modality, one_modality_token):
-
-            if modality_id != modality_type or length <= 0:
-                continue
-
-            modality_shape = batch_modality_token.shape
-
-            if channel_first:
-                mod_dim, *mod_axial_shape = modality_shape
-                batch_modality_token = rearrange(batch_modality_token, 'd ... -> d (...)')
-            else:
-                *mod_axial_shape, mod_dim = modality_shape
-                batch_modality_token = rearrange(batch_modality_token, '... d -> (...) d')
-
-            mod_length = math.prod(mod_axial_shape)
-
-            assert length == mod_length, f'received a modality of shape {modality_shape} but sequence length in modalities info is {length}'
-            assert dim == mod_dim, f'received modality [{modality_id}] with shape {modality_shape} but expected dimension of {dim}'
-
-            if channel_first:
-                output[batch_ind, :, offset:(offset + length)] = batch_modality_token
-            else:
-                output[batch_ind, offset:(offset + length), :] = batch_modality_token
-
-    return output
-
 # functions for managing modality token mask
 
 @typecheck
@@ -639,6 +593,24 @@ def min_p_filter(logits, min_p = 0.1):
     max_probs = probs.amax(dim = -1, keepdim = True)
     limit = min_p * max_probs
     return torch.where(probs < limit, float('-inf'), logits)
+
+def sample_text_token(logits, temperature = 1.0, min_p = 0.1):
+    if temperature == 0.:
+        return logits.argmax(dim = -1, keepdim = True)
+
+    logits = logits / temperature
+    logits = min_p_filter(logits, min_p = min_p)
+
+    probs = logits.softmax(dim = -1)
+    return torch.multinomial(probs, 1)
+
+def parse_forced_modality_at_start(force_modality_at_start):
+    """ normalize `force_modality_at_start` to a (modality_type, shape) tuple """
+
+    if isinstance(force_modality_at_start, tuple):
+        return force_modality_at_start
+
+    return force_modality_at_start, None
 
 # random fourier embedding
 
@@ -1188,7 +1160,8 @@ class Transformer(Module):
             attn_mask_kwargs.update(attn_mask = attn_mask)
 
         if not exists(is_any_modality) and exists(modality_positions):
-            is_any_modality = modality_positions_to_is_modality_mask(seq_len, modality_positions).any(dim = 1)
+            num_modalities = modality_positions[..., 0].amax().item() + 1
+            is_any_modality = modality_positions_to_is_modality_mask(seq_len, modality_positions, num_modalities = num_modalities).any(dim = 1)
             is_any_modality = reduce(is_any_modality, 'b t n -> b n', 'any')
 
         # handle kv caching
@@ -1635,11 +1608,12 @@ class Transfusion(Module):
         self,
         seq: Int['n'],
         modality_id: int,
-        fixed_modality_shape: tuple[int, ...] | None = None
+        fixed_modality_shape: tuple[int, ...] | None = None,
+        forced_modality_shape: tuple[int, ...] | None = None
     ) -> tuple[int, ...]:
-        """ determine the shape of the modality to be decoded, either from the meta string tokens after the [mom] token, or fall back to the default shape """
+        """ determine the shape of the modality to be decoded, either from the forced shape, the meta string tokens after the [som] token, or fall back to the default shape """
 
-        modality_shape = fixed_modality_shape
+        modality_shape = default(forced_modality_shape, fixed_modality_shape)
 
         maybe_meta_tensor = get_tokens_since_rightmost_id(seq, self.meta_id)
 
@@ -1649,7 +1623,7 @@ class Transfusion(Module):
         maybe_modality_num_dim = mod.num_dim
         meta_str_to_modality_shape = mod.to_shape_fn
 
-        if maybe_meta_tensor.numel() > 0:
+        if maybe_meta_tensor.numel() > 0 and not exists(forced_modality_shape):
             meta_tensor = maybe_meta_tensor[:-1]
             meta_str = self.decode_chars(meta_tensor)
 
@@ -1724,31 +1698,46 @@ class Transfusion(Module):
 
         return ema
 
-    @torch.no_grad()
-    @temp_eval
-    @typecheck
-    def sample_one(
+    def maybe_force_modality_at_start(
         self,
-        prompt: ModalitySample | Tensor | tuple[int, Float['...']] | None = None,
-        max_length = 2048,
-        text_temperature = 1.0,
-        text_min_p = 0.1,
-        cache_kv = False,
-        fixed_modality_shape: tuple[int, ...] | None = None,
-        init_modality_noise: Float['n d'] | None = None,
-        modality_steps = 16,
-        return_unprocessed_modalities = False,
-        cfg_scale = 3.
-    ) -> ModalitySample:
+        sample: ModalitySample,
+        force_modality_at_start: int | tuple[int, tuple[int, ...]] | None
+    ) -> tuple[ModalitySample, int | None, tuple[int, ...] | None]:
+        """ append the [som] (and optional [meta] + shape) tokens to the end of the prompt so that sampling starts off by decoding the forced modality, returning the forced modality type and shape """
+
+        forced_modality_id, forced_modality_shape = parse_forced_modality_at_start(force_modality_at_start)
+
+        if not exists(forced_modality_id):
+            return sample, forced_modality_id, forced_modality_shape
 
         device = self.device
+        mod = self.get_modality_info(forced_modality_id)
 
-        # handle edge case where there are no text tokens
+        if exists(forced_modality_shape):
+            modality_shape_str = join([*map(str, forced_modality_shape)], ',')
+            meta_tensor, shape_tokens, som_tensor, _ = get_cached_meta_tokens(self, device, modality_shape_str, forced_modality_id)
 
-        if self.num_text_tokens == 0:
-            logger.warning(f'you have `num_text_tokens` set to 0, so `sample` will be forwarded to `generate_modality_only(batch_size: int, modality_type: int)` method')
+            forced_tokens = cat((meta_tensor, shape_tokens, som_tensor))
+        else:
+            forced_tokens = tensor([mod.som_id], device = device)
 
-            return self.generate_modality_only(batch_size = 1)
+        last_part = sample[-1]
+
+        if is_int_tensor(last_part):
+            sample[-1] = cat((last_part, forced_tokens))
+        else:
+            sample.append(forced_tokens)
+
+        return sample, forced_modality_id, forced_modality_shape
+
+    def prepare_prompt_sample(
+        self,
+        prompt: ModalitySample | Tensor | tuple[int, Float['...']] | None,
+        force_modality_at_start: int | tuple[int, tuple[int, ...]] | None
+    ) -> tuple[ModalitySample, int | None, tuple[int, ...] | None]:
+        """ normalize a prompt into a full sample of [sos] + prompt parts, with any forced modality at start, returning the forced modality type and shape """
+
+        device = self.device
 
         # take care of prompt being a raw tensor, either text or raw modality (image, video, actions, latents, etc)
 
@@ -1773,27 +1762,118 @@ class Transfusion(Module):
             modality_meta_info = self.char_tokenizer(modality_shape_str, device = device)
 
             prompt = [
-                tensor([self.meta_id]),
+                tensor([self.meta_id], device = device),
                 modality_meta_info,
-                tensor([mod.som_id]),
+                tensor([mod.som_id], device = device),
                 (modality_type, modality),
-                tensor([mod.eom_id]),
+                tensor([mod.eom_id], device = device),
             ]
 
-        # sos
+        elif not exists(prompt):
+            prompt = []
 
-        init_text_seq = tensor([self.sos_id], device = device)
+        if isinstance(prompt, list):
+            prompt = [part for part in prompt if exists(part)]
 
-        # just take care of prompt being zero dimensions
+            # a raw modality ending the prompt is closed with its [eom], so that text decoding
+            # resumes from the end of the modality as it would in training
 
-        modality_sample = [init_text_seq, *default(prompt, [])]
+            if prompt and not is_tensor(prompt[-1]):
+                last_modality_type, _ = prompt[-1]
+                eom_id = self.get_modality_info(last_modality_type).eom_id
+                prompt.append(tensor([eom_id], device = device))
 
-        # take care of moving to device
+        # sos, plus take care of prompt being zero dimensions and moving to device
 
-        modality_sample = tree_map_tensor_to_device(modality_sample, device)
-        modality_sample = tree_map_tensor(atleast_1d, modality_sample)
+        sample = [tensor([self.sos_id], device = device), *prompt]
 
-        modality_sample = concat_contiguous_text(modality_sample)
+        sample = tree_map_tensor_to_device(sample, device)
+        sample = tree_map_tensor(atleast_1d, sample)
+
+        sample = concat_contiguous_text(sample)
+
+        # maybe force the first generated thing to be a modality of a specific type, and shape if given
+
+        return self.maybe_force_modality_at_start(
+            sample,
+            force_modality_at_start
+        )
+
+    def get_modality_transition(
+        self,
+        seq: Int['n'],
+        fixed_modality_shape: tuple[int, ...] | None,
+        forced_modality_id: int | None,
+        forced_modality_shape: tuple[int, ...] | None
+    ) -> tuple[int, tuple[int, ...]] | None:
+        """ if the last token of `seq` is a [som] token, return the (modality type, shape) of the modality to decode next, otherwise None """
+
+        sampled_token_id = seq[-1]
+
+        if sampled_token_id not in self.som_ids:
+            return None
+
+        curr_modality_id = self.som_ids.index(sampled_token_id)
+
+        modality_shape = self.get_modality_shape_from_seq(
+            seq,
+            curr_modality_id,
+            fixed_modality_shape,
+            forced_modality_shape if curr_modality_id == forced_modality_id else None
+        )
+
+        return curr_modality_id, modality_shape
+
+    @torch.no_grad()
+    def decode_modalities(
+        self,
+        samples: ModalitySample | list[ModalitySample]
+    ) -> ModalitySample | list[ModalitySample]:
+        """ post process the sampled modalities, running them through the modality decoders if they exist """
+
+        for mod in self.get_all_modality_info():
+            decoder_fn = default(mod.decoder, nn.Identity())
+
+            decoder_fn.eval()
+            samples = apply_fn_modality_type(decoder_fn, samples, modality_type = mod.modality_type)
+
+        return samples
+
+    @torch.no_grad()
+    @temp_eval
+    @typecheck
+    def sample_one(
+        self,
+        prompt: ModalitySample | Tensor | tuple[int, Float['...']] | None = None,
+        max_length = 2048,
+        text_temperature = 1.0,
+        text_min_p = 0.1,
+        cache_kv = False,
+        fixed_modality_shape: tuple[int, ...] | None = None,
+        force_modality_at_start: int | tuple[int, tuple[int, ...]] | None = None,
+        init_modality_noise: Float['n d'] | None = None,
+        modality_steps = 16,
+        return_unprocessed_modalities = False,
+        cfg_scale = 3.
+    ) -> ModalitySample:
+
+        device = self.device
+
+        # handle edge case where there are no text tokens
+
+        if self.num_text_tokens == 0:
+            logger.warning(f'you have `num_text_tokens` set to 0, so `sample` will be forwarded to `generate_modality_only(batch_size: int, modality_type: int)` method')
+
+            forced_modality_id, forced_modality_shape = parse_forced_modality_at_start(force_modality_at_start)
+
+            return self.generate_modality_only(batch_size = 1, modality_type = forced_modality_id, fixed_modality_shape = forced_modality_shape)
+
+        # take care of prompt being a raw tensor, either text or raw modality (image, video, actions, latents, etc)
+
+        modality_sample, forced_modality_id, forced_modality_shape = self.prepare_prompt_sample(
+            prompt,
+            force_modality_at_start
+        )
 
         *_, last_modality_sample = modality_sample
 
@@ -1803,7 +1883,6 @@ class Transfusion(Module):
 
         num_past_modalities = sum(not is_tensor(part) for part in modality_sample) # any modalities in the prompt count as previously decoded, for the time conditioning
 
-        text_is_greedy = text_temperature == 0.
         is_decoding_text = True  # starts off with text decoding, and alternates with modalities depending on [som] tokens detected
 
         def maybe_transition_to_modality_decoding(seq):
@@ -1811,20 +1890,18 @@ class Transfusion(Module):
             nonlocal is_decoding_text
             nonlocal curr_modality_id
 
-            sampled_token_id = seq[-1]
+            transition = self.get_modality_transition(seq, fixed_modality_shape, forced_modality_id, forced_modality_shape)
 
-            if sampled_token_id not in self.som_ids:
+            if not exists(transition):
                 return
 
-            curr_modality_id = self.som_ids.index(sampled_token_id)
-
-            modality_shape = self.get_modality_shape_from_seq(seq, curr_modality_id, fixed_modality_shape)
-
+            curr_modality_id, modality_shape = transition
             is_decoding_text = False
 
-        # determine if to transition from start
+        # determine if to transition from start, if the prompt ends with a [som]
 
-        maybe_transition_to_modality_decoding(last_modality_sample)
+        if is_tensor(last_modality_sample):
+            maybe_transition_to_modality_decoding(last_modality_sample)
 
         cache = None
 
@@ -1848,14 +1925,7 @@ class Transfusion(Module):
 
                     logits = logits[0][-1]
 
-                    if text_is_greedy:
-                        sampled = logits.argmax(dim = -1, keepdim = True)
-                    else:
-                        logits = logits / text_temperature
-                        logits = min_p_filter(logits, min_p = text_min_p)
-
-                        probs = logits.softmax(dim = -1)
-                        sampled = torch.multinomial(probs, 1)
+                    sampled = sample_text_token(logits, text_temperature, text_min_p)
 
                     seq = torch.cat((seq, sampled), dim = -1)
                     modality_sample[-1] = seq
@@ -2000,16 +2070,7 @@ class Transfusion(Module):
         if return_unprocessed_modalities:
             return modality_sample
 
-        # post process modality sample, decoding modality types if they have a decoder
-
-        for mod in self.get_all_modality_info():
-            decoder_fn = default(mod.decoder, nn.Identity())
-
-            with torch.no_grad():
-                decoder_fn.eval()
-                modality_sample = apply_fn_modality_type(decoder_fn, modality_sample, modality_type = mod.modality_type)
-
-        return modality_sample
+        return self.decode_modalities(modality_sample)
 
     # `sample_one` is kept around as `sample` for backwards compatibility
 
@@ -2025,6 +2086,7 @@ class Transfusion(Module):
         text_temperature = 1.0,
         text_min_p = 0.1,
         fixed_modality_shape: tuple[int, ...] | None = None,
+        force_modality_at_start: int | tuple[int, tuple[int, ...]] | None = None,
         init_modality_noise: Float['n d'] | None = None,
         modality_steps = 16,
         return_unprocessed_modalities = False,
@@ -2049,6 +2111,10 @@ class Transfusion(Module):
         `sample_one` - a list of text tensors / (modality_type, modality) tuples, a raw tensor or
         tuple, or `None` for an empty prompt. a list of raw prompts is a batch of independent
         prompts, one sample per element.
+
+        `force_modality_at_start` - an int (modality type) or a (modality_type, shape) tuple - makes
+        every sample in the batch start off by decoding that modality (skipping text decoding), with
+        the shape taken from the tuple, `fixed_modality_shape`, or the modality's default shape.
         """
 
         device = self.device
@@ -2067,47 +2133,10 @@ class Transfusion(Module):
         sample_seq_lens = []
 
         for prompt in prompts:
-            # take care of raw tensors, either text or raw modality
-
-            if is_tensor(prompt) and prompt.is_floating_point():
-                prompt = (0, prompt)
-
-            if is_int_tensor(prompt):
-                prompt = [prompt]
-
-            elif isinstance(prompt, tuple):
-                modality_type, modality = prompt
-
-                mod = self.get_modality_info(modality_type)
-
-                if exists(mod.encoder):
-                    with torch.no_grad():
-                        mod.encoder.eval()
-                        modality = self.maybe_add_temp_batch_dim(mod.encoder)(modality).detach()
-
-                modality_shape_tuple = self.get_modality_shape(modality, modality_type)
-                modality_shape_str = join([*map(str, modality_shape_tuple)], ',')
-                modality_meta_info = self.char_tokenizer(modality_shape_str, device = device)
-
-                prompt = [
-                    tensor([self.meta_id], device = device),
-                    modality_meta_info,
-                    tensor([mod.som_id], device = device),
-                    (modality_type, modality),
-                    tensor([mod.eom_id], device = device),
-                ]
-
-            elif not exists(prompt):
-                prompt = []
-
-            if isinstance(prompt, list):
-                prompt = [part for part in prompt if exists(part)]
-
-            sample = [tensor([self.sos_id], device = device), *prompt]
-
-            sample = tree_map_tensor_to_device(sample, device)
-            sample = tree_map_tensor(atleast_1d, sample)
-            sample = concat_contiguous_text(sample)
+            sample, forced_modality_id, forced_modality_shape = self.prepare_prompt_sample(
+                prompt,
+                force_modality_at_start
+            )
 
             # count the tokens in the sample - and the rotary position collapse of each modality
             # instance (all tokens of a modality share a single position)
@@ -2150,34 +2179,36 @@ class Transfusion(Module):
             sample_seq_lens.append(seq_len)
 
         # one batched forward over all the prompts - builds the kv caches and gives the logits for
-        # sampling the first token of each sample (the same forward `sample_one` uses for its first
-        # text decoding step, so the kv caches are laid out identically)
+        # the first token of each sample, the same forward `sample_one` uses for its first text
+        # decoding step. `return_embed` is set so the processing does not re-add the [meta] [shape]
+        # [som] [eom] tokens around prompted modalities, and the prompted modalities are
+        # conditioned at a time of 1., as `sample_one` conditions previously decoded ones
 
-        logits, (init_cache_tensor, _) = self.forward(
+        max_past_modalities = max((state.num_past_modalities for state in states), default = 0)
+
+        init_times = None
+
+        if max_past_modalities > 0:
+            init_times = torch.ones((len(states), max_past_modalities), device = device)
+
+        (embed, _), (init_cache_tensor, _) = self.forward(
             [state.sample for state in states],
+            times = init_times,
             return_loss = False,
+            return_embed = True,
             decoding_text_or_modality = 'text',
             return_kv_cache = True
         )
 
-        text_is_greedy = text_temperature == 0.
+        logits = self.to_text_logits(embed)
 
-        def sample_text_token(logits):
-            if text_is_greedy:
-                return logits.argmax(dim = -1, keepdim = True)
+        def maybe_transition_to_modality(state):
+            transition = self.get_modality_transition(state.curr_seq, fixed_modality_shape, forced_modality_id, forced_modality_shape)
 
-            logits = logits / text_temperature
-            logits = min_p_filter(logits, min_p = text_min_p)
-
-            probs = logits.softmax(dim = -1)
-            return torch.multinomial(probs, 1)
-
-        def maybe_transition_to_modality(state, sampled_token_id):
-            if sampled_token_id not in self.som_ids:
+            if not exists(transition):
                 return False
 
-            curr_modality_id = self.som_ids.index(sampled_token_id)
-            modality_shape = self.get_modality_shape_from_seq(state.curr_seq, curr_modality_id, fixed_modality_shape)
+            curr_modality_id, modality_shape = transition
 
             mod = self.get_modality_info(curr_modality_id)
 
@@ -2192,8 +2223,7 @@ class Transfusion(Module):
         # determine if to transition from start (a prompt ending in [som])
 
         for state in states:
-            if exists(state.last_token) and state.last_token.item() in self.som_ids:
-                maybe_transition_to_modality(state, state.last_token.item())
+            maybe_transition_to_modality(state)
 
         # slice out the kv cache per sample, sample the first token
 
@@ -2201,7 +2231,7 @@ class Transfusion(Module):
             state.cache = init_cache_tensor[:, :, ind:ind + 1, :, :seq_len]
 
             if state.phase == 'text':
-                sampled = sample_text_token(logits[ind, seq_len - 1])
+                sampled = sample_text_token(logits[ind, seq_len - 1], text_temperature, text_min_p)
 
                 state.curr_seq = cat((state.curr_seq, sampled))
                 state.sample[-1] = state.curr_seq
@@ -2217,7 +2247,7 @@ class Transfusion(Module):
                     state.phase = 'done'
                     continue
 
-                maybe_transition_to_modality(state, sampled_token_id)
+                maybe_transition_to_modality(state)
 
             if state.num_tokens > max_length:
                 state.phase = 'done'
@@ -2284,7 +2314,7 @@ class Transfusion(Module):
 
             logits = self.to_text_logits(embed)[:, -1]
 
-            sampled = sample_text_token(logits)
+            sampled = sample_text_token(logits, text_temperature, text_min_p)
 
             # update each sample and transition out of the text phase as needed
             # (new cache layout is (layers, key/value, batch, heads, seq, dim_head) - each sample's
@@ -2315,7 +2345,7 @@ class Transfusion(Module):
                     state.phase = 'done'
                     continue
 
-                if maybe_transition_to_modality(state, sampled_token_id):
+                if maybe_transition_to_modality(state):
                     pbar.set_description(f'decoding modality [{state.curr_modality_id}]')
 
         # one batched modality decoding step - all samples in the modality phase share a single
@@ -2550,16 +2580,7 @@ class Transfusion(Module):
         if return_unprocessed_modalities:
             return samples
 
-        # post process modality samples, decoding modality types if they have a decoder
-
-        for mod in self.get_all_modality_info():
-            decoder_fn = default(mod.decoder, nn.Identity())
-
-            with torch.no_grad():
-                decoder_fn.eval()
-                samples = apply_fn_modality_type(decoder_fn, samples, modality_type = mod.modality_type)
-
-        return samples
+        return self.decode_modalities(samples)
 
     @typecheck
     def forward_text(
@@ -2762,7 +2783,7 @@ class Transfusion(Module):
 
             _, *axial_dims, _ = noised_tokens.shape
 
-            assert len(axial_dims) == mod.num_dim, f'received modalities of ndim {len(axial_dims)} but expected {modality_num_dim}'
+            assert len(axial_dims) == mod.num_dim, f'received modalities of ndim {len(axial_dims)} but expected {mod.num_dim}'
 
         # maybe transform
 
@@ -3068,12 +3089,6 @@ class Transfusion(Module):
 
         # process list of text and modalities interspersed with one another
 
-        modality_positions = []
-        modality_tokens = []
-        modality_pos_emb = []
-
-        text = []
-
         modalities = tree_map_tensor_to_device(modalities, device)
 
         # for all modalities, batch process same shaped modalities of the same type
@@ -3183,6 +3198,13 @@ class Transfusion(Module):
             is_any_modality_when_decoding = decoding_text_or_modality == 'modality'
             modality_positions = None
 
+        elif decoding_text_or_modality == 'modality':
+            # first modality decode with no cache - the transformer's own fallback mask is
+            # hardcoded to `num_modalities = 1` and would be all zeros for any modality type
+            # beyond 0
+
+            is_any_modality_when_decoding = is_any_modality
+
         # derive rotary positions
 
         if exists(raw_cache):
@@ -3210,13 +3232,17 @@ class Transfusion(Module):
         times_cond = reduce(times_per_token, 'b t n -> b n', 'sum')
 
         # attention
+        # during decoding all tokens are of one kind (text or modality); when training, the
+        # per-token signal is derived from the modality positions
+
+        is_any_modality = default(is_any_modality_when_decoding, is_any_modality)
 
         embed, hiddens, *maybe_kv_cache = self.transformer(
             tokens,
             times = times_cond,
             rotary_emb = rotary_emb,
             modality_positions = modality_positions,
-            is_any_modality = is_any_modality_when_decoding,
+            is_any_modality = is_any_modality,
             cache = raw_cache,
             decode_length = decode_length,
             return_hiddens = True,
@@ -3340,10 +3366,13 @@ class Transfusion(Module):
         modality_loss_weights = stack(modality_loss_weights)
 
         # only the token positions that are not modalities have autoregressive loss
+        # if the batch contains no modalities, there is nothing to compute a flow loss on
+
+        flow_loss = self.zero if not flow_losses else (stack(flow_losses) * modality_loss_weights).sum()
 
         total_loss = (
             text_loss * text_loss_weight * self.text_loss_weight +
-            (stack(flow_losses) * modality_loss_weights).sum() * self.flow_loss_weight
+            flow_loss * self.flow_loss_weight
         )
 
         # whether to handle velocity consistency
@@ -3382,10 +3411,11 @@ class Transfusion(Module):
 
                 velocity_match_losses.append(velocity_match_loss)
 
-            total_loss = (
-                total_loss +
-                (stack(velocity_match_losses) * modality_loss_weights).sum() * self.velocity_consistency_loss_weight
-            )
+            if velocity_match_losses:
+                total_loss = (
+                    total_loss +
+                    (stack(velocity_match_losses) * modality_loss_weights).sum() * self.velocity_consistency_loss_weight
+                )
 
         # maybe reconstruction loss
 
