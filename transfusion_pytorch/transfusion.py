@@ -384,8 +384,15 @@ def excluded(start, end):
 
     return mask_fn
 
-def transfusion_attn_mask(modalities: Int['b m 3'], excluded_spans: Int['b m 2'] | None = None):
+def transfusion_attn_mask(
+    modalities: Int['b m 3'],
+    excluded_spans: Int['b m 2'] | None = None,
+    padding_mask: Bool['b n'] | None = None
+):
     modalities = modalities.long()
+
+    if exists(padding_mask):
+        padding_mask = padding_mask.to(device = modalities.device, dtype = torch.bool)
 
     def mask_mod(b, h, q_idx, kv_idx):
         mask = causal(b, h, q_idx, kv_idx)
@@ -398,6 +405,13 @@ def transfusion_attn_mask(modalities: Int['b m 3'], excluded_spans: Int['b m 2']
         if exists(excluded_spans):
             for start, end in excluded_spans[b]:
                 mask = mask & excluded(start, end)(b, h, q_idx, kv_idx)
+
+        if exists(padding_mask):
+            # Exclude per-sample padding keys.  Keep a padded query's diagonal
+            # so its softmax remains finite; padded rows are ignored by loss.
+            is_padding_query = ~padding_mask[b, q_idx]
+            mask = mask & padding_mask[b, kv_idx]
+            mask = mask | (is_padding_query & (q_idx == kv_idx))
 
         return mask
 
@@ -520,7 +534,8 @@ def naive_attn_mask(
     seq_len: int,
     modalities: Int['b m 3'],
     device = None,
-    excluded_spans: Int['b m 2'] | None = None
+    excluded_spans: Int['b m 2'] | None = None,
+    padding_mask: Bool['b n'] | None = None
 ) -> Bool['b i j']:
 
     _, offsets, length = modalities.unbind(dim = -1)
@@ -545,7 +560,73 @@ def naive_attn_mask(
         is_excluded = is_excluded.any(dim = 1)
         mask = mask & ~einx.logical_or('b i, b j -> b i j', is_excluded, is_excluded)
 
+    if exists(padding_mask):
+        padding_mask = padding_mask.to(device = device, dtype = torch.bool)
+        assert padding_mask.ndim == 2 and padding_mask.shape[-1] == seq_len
+
+        # Padding is per sample, so it must be applied to key columns rather
+        # than by masking a shared triangular matrix.  Keep the diagonal on a
+        # padded query to avoid an all-masked softmax row.
+        mask = mask & padding_mask[:, None, :]
+        diagonal = torch.eye(seq_len, device = device, dtype = torch.bool)
+        mask = mask | (~padding_mask[:, :, None] & diagonal)
+
     return mask
+
+def _causal_padding_mask(
+    is_valid: Bool['b n'],
+    past_length = 0,
+    past_padding_mask: Bool['b p'] | None = None
+) -> Bool['b i j']:
+    """Build a causal mask from a per-sample validity mask."""
+
+    batch, seq_len = is_valid.shape
+    device = is_valid.device
+    is_valid = is_valid.to(dtype = torch.bool)
+
+    if exists(past_padding_mask):
+        assert past_padding_mask.ndim == 2 and past_padding_mask.shape[0] == batch
+        past_padding_mask = past_padding_mask.to(device = device, dtype = torch.bool)
+        past_len = past_padding_mask.shape[-1]
+        assert past_length in (0, past_len)
+        key_is_valid = cat((past_padding_mask, is_valid), dim = -1)
+    else:
+        past_len = past_length
+        past_is_valid = torch.ones((batch, past_len), device = device, dtype = torch.bool)
+        key_is_valid = cat((past_is_valid, is_valid), dim = -1) if past_len > 0 else is_valid
+
+    query_positions = torch.arange(past_len, past_len + seq_len, device = device)
+    key_positions = torch.arange(past_len + seq_len, device = device)
+    causal = query_positions[:, None] >= key_positions[None, :]
+
+    mask = causal.unsqueeze(0) & key_is_valid.unsqueeze(1)
+
+    # A sample may be entirely padded (or left-padded before its first token).
+    # Keep each padded query's self-attention entry to avoid an all-masked row.
+    diagonal = query_positions[:, None] == key_positions[None, :]
+    mask = mask | (~is_valid.unsqueeze(-1) & diagonal)
+
+    return mask
+
+def text_attn_mask(
+    text: Int['b n'],
+    padding_id = -1,
+    past_length = 0,
+    past_padding_mask: Bool['b p'] | None = None
+) -> Bool['b i j']:
+    """Build a causal mask that excludes per-sample padding keys.
+
+    Padding query rows keep their diagonal entry so the attention softmax
+    remains well-defined; those rows are ignored by the language-model loss.
+    ``past_length`` accounts for a cached prefix whose keys are all valid;
+    ``past_padding_mask`` can override that assumption per sample.
+    """
+
+    return _causal_padding_mask(
+        text != padding_id,
+        past_length = past_length,
+        past_padding_mask = past_padding_mask
+    )
 
 # unet encoder related function
 
@@ -1025,7 +1106,10 @@ class Attention(Module):
     ):
         device, input_is_cuda, is_decoding_with_cache = x.device, x.is_cuda, exists(cache)
 
-        should_use_flex_attn = self.use_flex_attn and input_is_cuda
+        # A tensor attention mask is only supported by the explicit path.
+        # Falling back here prevents a supplied padding mask from being
+        # silently ignored by flex attention.
+        should_use_flex_attn = self.use_flex_attn and input_is_cuda and not exists(attn_mask)
 
         # handle maybe mask
         # if receiving kv cache, assume decoding and turn off all masking
@@ -1207,14 +1291,24 @@ class Transformer(Module):
         modality_only = False,
         causal_mask = False,
         return_hiddens = False,
-        return_kv_cache = False
+        return_kv_cache = False,
+        padding_mask: Bool['b n'] | None = None
     ):
         batch, seq_len, device, input_is_cuda = x.shape[0], x.shape[-2], x.device, x.is_cuda
 
         is_decoding_with_cache = exists(cache)
         needs_masking = not is_decoding_with_cache
 
-        should_use_flex_attn = input_is_cuda and needs_masking and self.use_flex_attn
+        # Explicit tensor masks use the regular attention path; flex
+        # attention would otherwise build a second mask and reject or ignore
+        # the per-sample padding mask.
+        should_use_flex_attn = (
+            input_is_cuda and
+            needs_masking and
+            self.use_flex_attn and
+            not exists(attn_mask) and
+            not exists(padding_mask)
+        )
 
         assert not (exists(attn_mask) and exists(modality_positions))
 
@@ -1234,7 +1328,11 @@ class Transformer(Module):
 
         if needs_masking:
             if causal_mask:
-                if should_use_flex_attn:
+                if exists(padding_mask):
+                    attn_mask_kwargs.update(
+                        attn_mask = _causal_padding_mask(padding_mask)
+                    )
+                elif should_use_flex_attn:
                     block_mask = create_block_mask(causal, B = None, H = None, Q_LEN = seq_len, KV_LEN = seq_len, _compile = True, device = device)
                     attn_mask_kwargs.update(block_mask = block_mask)
                 else:
@@ -1244,11 +1342,21 @@ class Transformer(Module):
                 assert not causal_mask
 
                 if should_use_flex_attn:
-                    transfusion_mask_fn = transfusion_attn_mask(modality_positions, excluded_spans = excluded_spans)
+                    transfusion_mask_fn = transfusion_attn_mask(
+                        modality_positions,
+                        excluded_spans = excluded_spans,
+                        padding_mask = padding_mask
+                    )
                     block_mask = create_block_mask(transfusion_mask_fn, B = batch, H = None, Q_LEN = seq_len, KV_LEN = seq_len, _compile = True, device = device)
                     attn_mask_kwargs.update(block_mask = block_mask)
                 else:
-                    attn_mask = naive_attn_mask(seq_len, modality_positions, excluded_spans = excluded_spans, device = device)
+                    attn_mask = naive_attn_mask(
+                        seq_len,
+                        modality_positions,
+                        excluded_spans = excluded_spans,
+                        padding_mask = padding_mask,
+                        device = device
+                    )
                     attn_mask_kwargs.update(attn_mask = attn_mask)
 
         # explicit mask is honored even when decoding with a cache - `sample_many` excludes the padded kv cache entries of other samples this way
@@ -2697,17 +2805,40 @@ class Transfusion(Module):
         device = self.device
         text = text.to(device)
 
+        # handle cache and tokens_seen.  A third cache element, when present,
+        # stores the valid-key mask for a padded text prefix.
+
+        if exists(cache):
+            raw_cache, tokens_seen, *maybe_past_padding_mask = cache
+            assert len(maybe_past_padding_mask) <= 1
+            past_padding_mask = maybe_past_padding_mask[0] if maybe_past_padding_mask else None
+        else:
+            raw_cache, tokens_seen, past_padding_mask = None, 0, None
+
         if return_loss:
             text, labels = text[:, :-1], text[:, 1:]
+
+            # A padded query has no preceding token to predict.  Ignore its
+            # label as well as labels that are themselves padding, otherwise
+            # left-padded samples train on a synthetic padding-to-token edge.
+            labels = labels.masked_fill((text == -1) | (labels == -1), self.ignore_index)
+
+        # `-1` is the padding sentinel used by the text loss below.  The
+        # original implementation replaced it before attention, allowing
+        # valid queries to attend to a different sample's padding tokens.
+        has_padding = (text == -1).any().item()
+        needs_padding_mask = has_padding or exists(past_padding_mask)
+        padding_attn_mask = text_attn_mask(
+            text,
+            past_length = tokens_seen if exists(raw_cache) else 0,
+            past_padding_mask = past_padding_mask
+        ) if needs_padding_mask else None
+        current_padding_mask = text != -1
 
         # embed text
 
         text = text.masked_fill(text == -1, 0)
         tokens = self.text_embed(text)
-
-        # handle cache and tokens_seen
-
-        raw_cache, tokens_seen = default(cache, (None, 0))
 
         # rotary
 
@@ -2723,6 +2854,7 @@ class Transfusion(Module):
             tokens,
             rotary_emb = rotary_emb,
             causal_mask = True,
+            attn_mask = padding_attn_mask,
             cache = raw_cache,
             decode_length = seq_len if exists(raw_cache) else None,
             return_kv_cache = return_kv_cache,
@@ -2730,7 +2862,18 @@ class Transfusion(Module):
         )
 
         embed, hiddens, *maybe_kv_cache = transformer_out
-        kv_cache = (maybe_kv_cache[0], tokens_seen + seq_len) if return_kv_cache else None
+        if return_kv_cache:
+            kv_cache = (maybe_kv_cache[0], tokens_seen + seq_len)
+
+            if needs_padding_mask:
+                next_padding_mask = current_padding_mask
+
+                if exists(past_padding_mask):
+                    next_padding_mask = cat((past_padding_mask.to(device), next_padding_mask), dim = -1)
+
+                kv_cache = (*kv_cache, next_padding_mask)
+        else:
+            kv_cache = None
 
         # text unembedding
 
@@ -3237,6 +3380,11 @@ class Transfusion(Module):
         if return_loss:
             text, text_labels = text[:, :-1], text[:, 1:]
 
+            # Do not train on transitions involving right-padding.  The
+            # processing strategies use ``-1`` for both padding and modality
+            # slots, so modality slots are filtered separately below.
+            text_labels = text_labels.masked_fill((text == -1) | (text_labels == -1), self.ignore_index)
+
             if exists(loss_weights):
                 # align the weights with the labels: labels[i] is the token at buffer position i + 1
 
@@ -3268,6 +3416,17 @@ class Transfusion(Module):
         is_modalities = modality_positions_to_is_modality_mask(seq_len, modality_positions, num_modalities = self.num_modalities, device = device)
 
         is_any_modality = reduce(is_modalities, 'b t m n -> b n', 'any')
+
+        # ``-1`` marks both modality slots and padding in the packed text
+        # buffer.  A modality position is still a real token and must remain
+        # attendable; only -1 positions outside all modality spans are
+        # padding.  The mask is per sample because each sample may have a
+        # different packed sequence length.
+        token_valid_mask = (text != -1) | is_any_modality
+        # Cached decoding supplies its own key mask at the call site (and the
+        # transformer only receives the newly decoded suffix), so this full
+        # packed-sequence mask is only meaningful for the initial pass.
+        padding_mask = token_valid_mask if (~token_valid_mask).any().item() and not exists(cache) else None
 
         # embed text
 
@@ -3344,6 +3503,7 @@ class Transfusion(Module):
             rotary_emb = rotary_emb,
             modality_positions = modality_positions,
             excluded_spans = excluded_spans,
+            padding_mask = padding_mask,
             is_any_modality = is_any_modality,
             cache = raw_cache,
             decode_length = decode_length,
@@ -3420,6 +3580,7 @@ class Transfusion(Module):
         # text autoregressive loss
 
         text_labels = text_labels.masked_fill(is_any_modality, self.ignore_index)
+        text_labels = text_labels.masked_fill(~token_valid_mask, self.ignore_index)
 
         # ignore "Image -> Null" mappings.
         text_labels = text_labels.masked_fill(text_labels == self.null_text_id, self.ignore_index)
