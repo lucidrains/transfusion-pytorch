@@ -95,6 +95,12 @@ model, optimizer, dataloader = accelerator.prepare(model, optimizer, dataloader)
 
 ema_model.to(accelerator.device)
 
+# compile in place, so parameter names and the ema updates stay the same
+
+if accelerator.device.type == 'cuda':
+    accelerator.unwrap_model(model).transformer.compile()
+    ema_model.ema_model.transformer.compile()
+
 # train loop
 
 for step in range(1, 100_000 + 1):
